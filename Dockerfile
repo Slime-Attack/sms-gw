@@ -10,16 +10,8 @@ RUN go mod download
 # Copy the source code
 COPY . .
 
-# Build the Go app
-RUN go build -o sms-gw main.go
-
-# Use a minimal image for running
-FROM alpine:latest
-WORKDIR /app
-
-# Copy the built binary and logs directory
-COPY --from=builder /app/sms-gw ./sms-gw
-COPY --from=builder /app/logs ./logs
+# Build the binary with optimizations for Linux
+RUN CGO_ENABLED=0 GOOS=linux go build -a -o cob-api .
 
 # Expose port 8080
 EXPOSE 8080
