@@ -7,6 +7,12 @@ on:
     branches: 
       - main
       - develop
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Docker image tag to deploy (commit SHA or version)"
+        required: false
+        default: "latest"
 
 jobs:
   build-and-push:
