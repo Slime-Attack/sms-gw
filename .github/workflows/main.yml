@@ -50,6 +50,12 @@ jobs:
             apexdev23/sms-gw:${{ steps.vars.outputs.docker_tag }}
             apexdev23/sms-gw:latest
 
+  ping-runner:
+    runs-on: self-hosted
+    steps:
+      - name: Echo test
+        run: echo "Runner is working!"
+
   deploy:
     needs: build-and-push
     runs-on: self-hosted
