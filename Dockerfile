@@ -1,6 +1,4 @@
-# Start from the official Golang image
 FROM golang:1.23-alpine AS builder
-
 WORKDIR /app
 
 # Copy go mod and sum files
@@ -11,7 +9,14 @@ RUN go mod download
 COPY . .
 
 # Build the binary with optimizations for Linux
-RUN CGO_ENABLED=0 GOOS=linux go build -a -o cob-api .
+RUN CGO_ENABLED=0 GOOS=linux go build -a -o sms-gw .
+
+# --- Runner stage ---
+FROM alpine:latest
+WORKDIR /app
+
+# Copy the built binary from builder
+COPY --from=builder /app/sms-gw ./sms-gw
 
 # Expose port 8080
 EXPOSE 8080
