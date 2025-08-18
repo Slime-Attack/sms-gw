@@ -48,7 +48,7 @@ func main() {
 	r := gin.Default()
 
 	r.GET("/send", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"message": "Hello, World!"})
+		c.JSON(http.StatusOK, gin.H{"message": "Hello, World!!"})
 	})
 
 	r.Run(":8080")
