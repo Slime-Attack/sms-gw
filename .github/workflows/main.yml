@@ -31,8 +31,8 @@ jobs:
             echo "docker_tag=$VERSION_TAG" >> $GITHUB_OUTPUT
             echo "is_version=true" >> $GITHUB_OUTPUT
           else
-            BRANCH=${GITHUB_REF##*/}
-            echo "docker_tag=$BRANCH" >> $GITHUB_OUTPUT
+            SHORT_SHA=$(git rev-parse --short HEAD)
+            echo "docker_tag=$SHORT_SHA" >> $GITHUB_OUTPUT
             echo "is_version=false" >> $GITHUB_OUTPUT
           fi
 
