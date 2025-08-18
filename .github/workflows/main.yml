@@ -1,4 +1,4 @@
-name: Docker Image CI
+name: Docker CI/CD
 
 on:
   push:
@@ -64,29 +64,3 @@ jobs:
         run: |
           cd ~/sms-gw
           ./deploy.sh ${{ github.event.inputs.tag || steps.vars.outputs.docker_tag }}
-
-  rollback:
-    runs-on: self-hosted
-    if: github.event_name == 'workflow_dispatch'
-    steps:
-      - uses: actions/checkout@v4
-      - name: Rollback to specific tag
-        run: |
-          cd ~/sms-gw
-          echo "Rolling back to tag: ${{ github.event.inputs.tag }}"
-          ./deploy.sh ${{ github.event.inputs.tag }}
-
-  collect-logs:
-    runs-on: self-hosted
-    if: github.event_name == 'workflow_dispatch'
-    steps:
-      - uses: actions/checkout@v4
-      - name: Collect logs folder
-        run: |
-          cd ~/sms-gw
-          tar -czf logs.tar.gz logs || echo "No logs directory found"
-      - name: Upload logs artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: app-logs
-          path: ~/sms-gw/logs.tar.gz

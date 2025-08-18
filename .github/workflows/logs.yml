@@ -1,0 +1,25 @@
+name: Collect Log
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Docker image tag to deploy (commit SHA or version)"
+        required: false
+        default: "latest"
+
+jobs:
+  collect-logs:
+    runs-on: self-hosted
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Collect logs folder
+        run: |
+          cd ~/sms-gw
+          tar -czf logs.tar.gz logs || echo "No logs directory found"
+      - name: Upload logs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-logs
+          path: ~/sms-gw/logs.tar.gz
