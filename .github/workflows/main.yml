@@ -6,12 +6,10 @@ on:
       - 'main-*'
       - 'uat-*'
       - 'develop-*' 
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: "Docker image tag to deploy (commit SHA or version)"
-        required: false
-        default: "latest"
+  workflow_run:
+    workflows: ["Auto Tag from Merge"]
+    types:
+      - completed
 
 jobs:
   build-and-push:
