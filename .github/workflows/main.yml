@@ -13,6 +13,9 @@ jobs:
   build-and-push:
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
+    outputs:
+      env: ${{ steps.env.outputs.env }}
+      docker_tag: ${{ steps.env.outputs.docker_tag }}
 
     steps:
       - name: Checkout code
@@ -30,7 +33,8 @@ jobs:
         id: env
         run: |
           TAG="${{ steps.tag.outputs.tag }}"
-          echo "env=$TAG" >> $GITHUB_OUTPUT
+          BRANCH_NAME=$(echo "$TAG" | cut -d'-' -f1)
+          echo "env=$BRANCH_NAME" >> $GITHUB_OUTPUT
           echo "docker_tag=$TAG" >> $GITHUB_OUTPUT
 
       - name: Docker login
@@ -50,18 +54,18 @@ jobs:
 
   deploy:
     needs: build-and-push
+    if: needs.build-and-push.outputs.env == matrix.env
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
         include:
           - env: main
-            runner: self-hosted main
+            runner: self-hosted-main
           - env: uat
-            runner: self-hosted uat
+            runner: self-hosted-uat
           - env: develop
-            runner: self-hosted dev
+            runner: self-hosted-dev
 
-    if: ${{ steps.env.outputs.env == matrix.env }}
     steps:
       - uses: actions/checkout@v4
 
@@ -72,4 +76,4 @@ jobs:
       - name: Deploy App
         run: |
           cd ~/sms-gw
-          ./deploy.sh "${{ needs.build-and-push.outputs.env__docker_tag }}"
+          ./deploy.sh "${{ needs.build-and-push.outputs.docker_tag }}"
