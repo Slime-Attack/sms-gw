@@ -1,5 +1,8 @@
 name: Auto Tag from Merge
 
+permissions:
+  contents: write
+
 on:
   push:
     branches:
