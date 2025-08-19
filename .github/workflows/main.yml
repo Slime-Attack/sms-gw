@@ -14,26 +14,22 @@ jobs:
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     outputs:
-      env: ${{ steps.env.outputs.env }}
       docker_tag: ${{ steps.env.outputs.docker_tag }}
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Fetch tags and extract latest
+      - name: Fetch tags and get latest
         id: tag
         run: |
           git fetch --tags
           TAG=$(git tag --sort=-creatordate | grep -E '^(main|uat|develop)-v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1)
           echo "tag=$TAG" >> $GITHUB_OUTPUT
 
-      - name: Set tag branch type
+      - name: Set tag info
         id: env
         run: |
           TAG="${{ steps.tag.outputs.tag }}"
-          BRANCH_NAME=$(echo "$TAG" | cut -d'-' -f1)
-          echo "env=$BRANCH_NAME" >> $GITHUB_OUTPUT
           echo "docker_tag=$TAG" >> $GITHUB_OUTPUT
 
       - name: Docker login
@@ -42,7 +38,7 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build and push Docker image
+      - name: Build and push image
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -51,33 +47,41 @@ jobs:
             apexdev23/sms-gw:${{ steps.env.outputs.docker_tag }}
             apexdev23/sms-gw:latest
 
-  deploy:
+  deploy-main:
+    if: startsWith(needs.build-and-push.outputs.docker_tag, 'main-')
     needs: build-and-push
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      matrix:
-        include:
-          - env: main
-            runner: self-hosted main
-          - env: uat
-            runner: self-hosted uat
-          - env: develop
-            runner: self-hosted dev
-
+    runs-on: self-hosted-main
     steps:
       - uses: actions/checkout@v4
-
-      - name: Skip unless matching environment
-        if: ${{ needs.build-and-push.outputs.env != matrix.env }}
-        run: echo "Skipping deploy for env ${{ matrix.env }}"
-
-      - name: Docker login on server
-        if: ${{ needs.build-and-push.outputs.env == matrix.env }}
+      - name: Docker login
+        run: echo ${{ secrets.DOCKERHUB_TOKEN }} | docker login -u ${{ secrets.DOCKERHUB_USERNAME }} --password-stdin
+      - name: Deploy
         run: |
-          echo ${{ secrets.DOCKERHUB_TOKEN }} | docker login -u ${{ secrets.DOCKERHUB_USERNAME }} --password-stdin
+          cd ~/sms-gw
+          ./deploy.sh "${{ needs.build-and-push.outputs.docker_tag }}"
 
-      - name: Deploy App
-        if: ${{ needs.build-and-push.outputs.env == matrix.env }}
+  deploy-uat:
+    if: startsWith(needs.build-and-push.outputs.docker_tag, 'uat-')
+    needs: build-and-push
+    runs-on: self-hosted-uat
+    steps:
+      - uses: actions/checkout@v4
+      - name: Docker login
+        run: echo ${{ secrets.DOCKERHUB_TOKEN }} | docker login -u ${{ secrets.DOCKERHUB_USERNAME }} --password-stdin
+      - name: Deploy
+        run: |
+          cd ~/sms-gw
+          ./deploy.sh "${{ needs.build-and-push.outputs.docker_tag }}"
+
+  deploy-dev:
+    if: startsWith(needs.build-and-push.outputs.docker_tag, 'develop-')
+    needs: build-and-push
+    runs-on: self-hosted-dev
+    steps:
+      - uses: actions/checkout@v4
+      - name: Docker login
+        run: echo ${{ secrets.DOCKERHUB_TOKEN }} | docker login -u ${{ secrets.DOCKERHUB_USERNAME }} --password-stdin
+      - name: Deploy
         run: |
           cd ~/sms-gw
           ./deploy.sh "${{ needs.build-and-push.outputs.docker_tag }}"
