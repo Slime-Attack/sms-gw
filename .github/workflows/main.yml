@@ -50,7 +50,7 @@ jobs:
   deploy-main:
     if: startsWith(needs.build-and-push.outputs.docker_tag, 'main-')
     needs: build-and-push
-    runs-on: self-hosted-main
+    runs-on: [self-hosted, main]
     steps:
       - uses: actions/checkout@v4
       - name: Docker login
@@ -63,7 +63,7 @@ jobs:
   deploy-uat:
     if: startsWith(needs.build-and-push.outputs.docker_tag, 'uat-')
     needs: build-and-push
-    runs-on: self-hosted-uat
+    runs-on: [self-hosted, uat]
     steps:
       - uses: actions/checkout@v4
       - name: Docker login
@@ -76,7 +76,7 @@ jobs:
   deploy-dev:
     if: startsWith(needs.build-and-push.outputs.docker_tag, 'develop-')
     needs: build-and-push
-    runs-on: self-hosted-dev
+    runs-on: [self-hosted, dev]
     steps:
       - uses: actions/checkout@v4
       - name: Docker login
