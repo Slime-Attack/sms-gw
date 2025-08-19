@@ -8,7 +8,7 @@ on:
 
 permissions:
   contents: read
-  
+
 jobs:
   build-and-push:
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
@@ -18,20 +18,28 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set tag or branch
-        id: vars
+      - name: Fetch tags and extract latest
+        id: tag
         run: |
-          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
-            VERSION_TAG=${GITHUB_REF#refs/tags/}
-            echo "docker_tag=$VERSION_TAG" >> $GITHUB_OUTPUT
-            echo "is_version=true" >> $GITHUB_OUTPUT
-          else
-            BRANCH=${GITHUB_REF##*/}
-            echo "docker_tag=$BRANCH" >> $GITHUB_OUTPUT
-            echo "is_version=false" >> $GITHUB_OUTPUT
-          fi
+          git fetch --tags
+          TAG=$(git tag --sort=-creatordate | grep -E '^(main|uat|develop)-v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1)
+          echo "Detected tag: $TAG"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
 
-      - name: Log in to Docker Hub
+      - name: Set tag branch type
+        id: env
+        run: |
+          TAG="${{ steps.tag.outputs.tag }}"
+          if [[ "$TAG" == main-* ]]; then
+            echo "env=main" >> $GITHUB_OUTPUT
+          elif [[ "$TAG" == uat-* ]]; then
+            echo "env=uat" >> $GITHUB_OUTPUT
+          else
+            echo "env=develop" >> $GITHUB_OUTPUT
+          fi
+          echo "docker_tag=$TAG" >> $GITHUB_OUTPUT
+
+      - name: Docker login
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -43,57 +51,31 @@ jobs:
           context: .
           push: true
           tags: |
-            apexdev23/sms-gw:${{ steps.vars.outputs.docker_tag }}
+            apexdev23/sms-gw:${{ steps.env.outputs.docker_tag }}
             apexdev23/sms-gw:latest
 
-  deploy-main:
-    if: github.ref == 'refs/heads/main'
+  deploy:
     needs: build-and-push
-    runs-on: [self-hosted, main]
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - env: main
+            runner: self-hosted main
+          - env: uat
+            runner: self-hosted uat
+          - env: develop
+            runner: self-hosted dev
+
+    if: ${{ steps.env.outputs.env == matrix.env }}
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Docker login on server
         run: |
           echo ${{ secrets.DOCKERHUB_TOKEN }} | docker login -u ${{ secrets.DOCKERHUB_USERNAME }} --password-stdin
 
       - name: Deploy App
         run: |
-          TAG_NAME="${GITHUB_REF#refs/tags/}"
           cd ~/sms-gw
-          ./deploy.sh "$TAG_NAME"
-
-  deploy-uat:
-    if: github.ref == 'refs/heads/uat'
-    needs: build-and-push
-    runs-on: [self-hosted, uat]
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Docker login on server
-        run: |
-          echo ${{ secrets.DOCKERHUB_TOKEN }} | docker login -u ${{ secrets.DOCKERHUB_USERNAME }} --password-stdin
-
-      - name: Deploy App
-        run: |
-          TAG_NAME="${GITHUB_REF#refs/tags/}"
-          cd ~/sms-gw
-          ./deploy.sh "$TAG_NAME"
-
-  deploy-dev:
-    if: github.ref == 'refs/heads/develop'
-    needs: build-and-push
-    runs-on: [self-hosted, dev]
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Docker login on server
-        run: |
-          echo ${{ secrets.DOCKERHUB_TOKEN }} | docker login -u ${{ secrets.DOCKERHUB_USERNAME }} --password-stdin
-
-      - name: Deploy App
-        run: |
-          TAG_NAME="${GITHUB_REF#refs/tags/}"
-          cd ~/sms-gw
-          ./deploy.sh "$TAG_NAME"
-  
+          ./deploy.sh "${{ needs.build-and-push.outputs.env__docker_tag }}"
