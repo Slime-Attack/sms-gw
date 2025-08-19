@@ -3,11 +3,9 @@ name: Docker CI/CD
 on:
   push:
     tags:
-      - 'v*' 
-    branches: 
-      - main
-      - uat
-      - develop
+      - 'main-*'
+      - 'uat-*'
+      - 'develop-*' 
   workflow_dispatch:
     inputs:
       tag:
@@ -64,8 +62,9 @@ jobs:
 
       - name: Deploy App
         run: |
+          TAG_NAME="${GITHUB_REF#refs/tags/}"
           cd ~/sms-gw
-          ./deploy.sh ${{ github.event.inputs.tag || steps.vars.outputs.docker_tag }}
+          ./deploy.sh "$TAG_NAME"
 
   deploy-uat:
     if: github.ref == 'refs/heads/uat'
@@ -80,8 +79,9 @@ jobs:
 
       - name: Deploy App
         run: |
+          TAG_NAME="${GITHUB_REF#refs/tags/}"
           cd ~/sms-gw
-          ./deploy.sh ${{ github.event.inputs.tag || steps.vars.outputs.docker_tag }}
+          ./deploy.sh "$TAG_NAME"
 
   deploy-dev:
     if: github.ref == 'refs/heads/develop'
@@ -96,6 +96,7 @@ jobs:
 
       - name: Deploy App
         run: |
+          TAG_NAME="${GITHUB_REF#refs/tags/}"
           cd ~/sms-gw
-          ./deploy.sh ${{ github.event.inputs.tag || steps.vars.outputs.docker_tag }}
+          ./deploy.sh "$TAG_NAME"
   
