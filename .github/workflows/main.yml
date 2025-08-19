@@ -48,40 +48,49 @@ jobs:
             apexdev23/sms-gw:latest
 
   deploy-main:
-    if: startsWith(needs.build-and-push.outputs.docker_tag, 'main-')
+    if: github.ref == 'refs/heads/main'
     needs: build-and-push
     runs-on: [self-hosted, main]
     steps:
       - uses: actions/checkout@v4
-      - name: Docker login
-        run: echo ${{ secrets.DOCKERHUB_TOKEN }} | docker login -u ${{ secrets.DOCKERHUB_USERNAME }} --password-stdin
-      - name: Deploy
+      
+      - name: Docker login on server
+        run: |
+          echo ${{ secrets.DOCKERHUB_TOKEN }} | docker login -u ${{ secrets.DOCKERHUB_USERNAME }} --password-stdin
+
+      - name: Deploy App
         run: |
           cd ~/sms-gw
-          ./deploy.sh "${{ needs.build-and-push.outputs.docker_tag }}"
+          ./deploy.sh ${{ github.event.inputs.tag || steps.vars.outputs.docker_tag }}
 
   deploy-uat:
-    if: startsWith(needs.build-and-push.outputs.docker_tag, 'uat-')
+    if: github.ref == 'refs/heads/uat'
     needs: build-and-push
     runs-on: [self-hosted, uat]
     steps:
       - uses: actions/checkout@v4
-      - name: Docker login
-        run: echo ${{ secrets.DOCKERHUB_TOKEN }} | docker login -u ${{ secrets.DOCKERHUB_USERNAME }} --password-stdin
-      - name: Deploy
+      
+      - name: Docker login on server
+        run: |
+          echo ${{ secrets.DOCKERHUB_TOKEN }} | docker login -u ${{ secrets.DOCKERHUB_USERNAME }} --password-stdin
+
+      - name: Deploy App
         run: |
           cd ~/sms-gw
-          ./deploy.sh "${{ needs.build-and-push.outputs.docker_tag }}"
+          ./deploy.sh ${{ github.event.inputs.tag || steps.vars.outputs.docker_tag }}
 
   deploy-dev:
-    if: startsWith(needs.build-and-push.outputs.docker_tag, 'develop-')
+    if: github.ref == 'refs/heads/develop'
     needs: build-and-push
     runs-on: [self-hosted, dev]
     steps:
       - uses: actions/checkout@v4
-      - name: Docker login
-        run: echo ${{ secrets.DOCKERHUB_TOKEN }} | docker login -u ${{ secrets.DOCKERHUB_USERNAME }} --password-stdin
-      - name: Deploy
+      
+      - name: Docker login on server
+        run: |
+          echo ${{ secrets.DOCKERHUB_TOKEN }} | docker login -u ${{ secrets.DOCKERHUB_USERNAME }} --password-stdin
+
+      - name: Deploy App
         run: |
           cd ~/sms-gw
-          ./deploy.sh "${{ needs.build-and-push.outputs.docker_tag }}"
+          ./deploy.sh ${{ github.event.inputs.tag || steps.vars.outputs.docker_tag }}
