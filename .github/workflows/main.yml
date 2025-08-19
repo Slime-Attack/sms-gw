@@ -1,22 +1,17 @@
 name: Docker CI/CD
 
 on:
-  push:
-    tags:
-      - 'v*' 
-    branches: 
-      - main
-      - uat
-      - develop
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: "Docker image tag to deploy (commit SHA or version)"
-        required: false
-        default: "latest"
+  workflow_run:
+    workflows: ["Auto Tag from Merge"]
+    types:
+      - completed
 
+permissions:
+  contents: read
+  
 jobs:
   build-and-push:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
 
     steps:
@@ -64,8 +59,9 @@ jobs:
 
       - name: Deploy App
         run: |
+          TAG_NAME="${GITHUB_REF#refs/tags/}"
           cd ~/sms-gw
-          ./deploy.sh ${{ github.event.inputs.tag || steps.vars.outputs.docker_tag }}
+          ./deploy.sh "$TAG_NAME"
 
   deploy-uat:
     if: github.ref == 'refs/heads/uat'
@@ -80,8 +76,9 @@ jobs:
 
       - name: Deploy App
         run: |
+          TAG_NAME="${GITHUB_REF#refs/tags/}"
           cd ~/sms-gw
-          ./deploy.sh ${{ github.event.inputs.tag || steps.vars.outputs.docker_tag }}
+          ./deploy.sh "$TAG_NAME"
 
   deploy-dev:
     if: github.ref == 'refs/heads/develop'
@@ -96,6 +93,7 @@ jobs:
 
       - name: Deploy App
         run: |
+          TAG_NAME="${GITHUB_REF#refs/tags/}"
           cd ~/sms-gw
-          ./deploy.sh ${{ github.event.inputs.tag || steps.vars.outputs.docker_tag }}
+          ./deploy.sh "$TAG_NAME"
   
