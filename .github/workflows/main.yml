@@ -30,13 +30,7 @@ jobs:
         id: env
         run: |
           TAG="${{ steps.tag.outputs.tag }}"
-          if [[ "$TAG" == main-* ]]; then
-            echo "env=main" >> $GITHUB_OUTPUT
-          elif [[ "$TAG" == uat-* ]]; then
-            echo "env=uat" >> $GITHUB_OUTPUT
-          else
-            echo "env=develop" >> $GITHUB_OUTPUT
-          fi
+          echo "env=$TAG" >> $GITHUB_OUTPUT
           echo "docker_tag=$TAG" >> $GITHUB_OUTPUT
 
       - name: Docker login
