@@ -58,11 +58,11 @@ jobs:
       matrix:
         include:
           - env: main
-            runner: self-hosted-main
+            runner: self-hosted main
           - env: uat
-            runner: self-hosted-uat
+            runner: self-hosted uat
           - env: develop
-            runner: self-hosted-dev
+            runner: self-hosted dev
 
     steps:
       - uses: actions/checkout@v4
