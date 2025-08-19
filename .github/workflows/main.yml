@@ -26,7 +26,6 @@ jobs:
         run: |
           git fetch --tags
           TAG=$(git tag --sort=-creatordate | grep -E '^(main|uat|develop)-v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1)
-          echo "Detected tag: $TAG"
           echo "tag=$TAG" >> $GITHUB_OUTPUT
 
       - name: Set tag branch type
@@ -54,7 +53,6 @@ jobs:
 
   deploy:
     needs: build-and-push
-    if: needs.build-and-push.outputs.env == matrix.env
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
@@ -69,11 +67,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Skip unless matching environment
+        if: ${{ needs.build-and-push.outputs.env != matrix.env }}
+        run: echo "Skipping deploy for env ${{ matrix.env }}"
+
       - name: Docker login on server
+        if: ${{ needs.build-and-push.outputs.env == matrix.env }}
         run: |
           echo ${{ secrets.DOCKERHUB_TOKEN }} | docker login -u ${{ secrets.DOCKERHUB_USERNAME }} --password-stdin
 
       - name: Deploy App
+        if: ${{ needs.build-and-push.outputs.env == matrix.env }}
         run: |
           cd ~/sms-gw
           ./deploy.sh "${{ needs.build-and-push.outputs.docker_tag }}"
