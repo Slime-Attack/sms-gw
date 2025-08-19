@@ -1,11 +1,6 @@
 name: Docker CI/CD
 
 on:
-  push:
-    tags:
-      - 'main-*'
-      - 'uat-*'
-      - 'develop-*' 
   workflow_run:
     workflows: ["Auto Tag from Merge"]
     types:
