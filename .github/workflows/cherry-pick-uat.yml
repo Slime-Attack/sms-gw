@@ -1,82 +1,141 @@
-name: Cherry Pick to UAT
+name: UAT Deploy (pick labeled PRs)
 
 on:
-  workflow_dispatch:
-    inputs:
-      pr_numbers:
-        description: "Comma-separated PR numbers (e.g. 101,103)"
-        required: true
-      base:
-        description: "Target env branch"
-        required: true
-        default: uat
+  workflow_dispatch: {}
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: uat
+  cancel-in-progress: true
 
 jobs:
-  promote:
+  build-uat-ephemeral:
     runs-on: ubuntu-latest
+    outputs:
+      docker_tag: ${{ steps.settag.outputs.docker_tag }}
     steps:
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Prepare promotion branch
-        id: prep
-        shell: bash
+      - name: Configure Git identity (needed for cherry-pick)
         run: |
-          set -euo pipefail
-          BASE="${{ github.event.inputs.base }}"
-          git fetch origin "$BASE" --prune --tags
-          TS=$(date -u +%Y%m%d-%H%M%S)
-          PROMO_BRANCH="promote/${BASE}/${TS}"
-          git checkout -B "$PROMO_BRANCH" "origin/$BASE"
-          echo "branch=$PROMO_BRANCH" >> "$GITHUB_OUTPUT"
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Cherry-pick selected PRs
+      - name: Ensure jq is available
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      - name: Collect merged PRs labeled promote:uat not yet in UAT
+        id: collect
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}   # same as secrets.GITHUB_TOKEN
           REPO: ${{ github.repository }}
-          PRS:  ${{ github.event.inputs.pr_numbers }}
         shell: bash
         run: |
           set -euo pipefail
-          IFS=',' read -ra LIST <<< "$PRS"
-          git fetch origin "+refs/heads/*:refs/remotes/origin/*" --tags
+          BASE=uat
+          git fetch origin "$BASE" --prune --tags
 
-          for raw in "${LIST[@]}"; do
-            PR=$(echo "$raw" | xargs)
-            echo "::group::Cherry-pick PR #$PR"
-            # Get the merge commit SHA created when the PR was merged into develop
-            SHA=$(gh api repos/$REPO/pulls/$PR -q .merge_commit_sha)
-            if [ -z "${SHA:-}" ] || [ "$SHA" = "null" ]; then
-              echo "PR #$PR is not merged or SHA unavailable. Aborting." >&2
-              exit 1
-            fi
+          # Get merged PRs with label and base develop
+          gh pr list --repo "$REPO" --state merged \
+            --search 'label:"promote:uat" base:develop' --limit 200 \
+            --json number,mergeCommit,mergedAt \
+            | jq -r '
+                map(select(.mergeCommit != null))
+                | sort_by(.mergedAt)
+                | .[]
+                | "\(.number) \(.mergeCommit.oid) \(.mergedAt)"' \
+            > /tmp/all.txt
 
-            # Try as normal commit first; if it's a merge commit, retry with -m 1
-            if git cherry-pick "$SHA"; then
-              echo "Cherry-picked $SHA"
+          : > /tmp/todo.txt
+          while read -r num sha mergedAt; do
+            [ -z "${num:-}" ] && continue
+            # Skip if already contained in origin/uat
+            if git merge-base --is-ancestor "$sha" "origin/$BASE"; then
+              echo "PR #$num already in $BASE"
             else
-              echo "Retrying as merge commit (-m 1)..."
-              git cherry-pick --abort || true
-              git cherry-pick -m 1 "$SHA"
+              echo "$num $sha" >> /tmp/todo.txt
             fi
-            echo "::endgroup::"
-          done
+          done < /tmp/all.txt
 
-      - name: Push promotion branch
-        run: git push -u origin "${{ steps.prep.outputs.branch }}"
+          if [ -s /tmp/todo.txt ]; then
+            echo "To cherry-pick:"
+            cat /tmp/todo.txt
+            echo "pairs=$(paste -sd, /tmp/todo.txt)" >> "$GITHUB_OUTPUT"
+            echo "prs=$(cut -d' ' -f1 /tmp/todo.txt | paste -sd, -)" >> "$GITHUB_OUTPUT"
+          else
+            echo "pairs=" >> "$GITHUB_OUTPUT"
+            echo "prs=" >> "$GITHUB_OUTPUT"
+            echo "No new labeled PRs to include."
+          fi
 
-      - name: Open PR into UAT
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Prepare ephemeral UAT composition
+        shell: bash
         run: |
-          gh pr create \
-            --base "${{ github.event.inputs.base }}" \
-            --head "${{ steps.prep.outputs.branch }}" \
-            --title "Promote to ${{ github.event.inputs.base }}: PRs ${{ github.event.inputs.pr_numbers }}" \
-            --body  "Cherry-picked PRs ${{ github.event.inputs.pr_numbers }} into ${{ github.event.inputs.base }}."
+          set -euo pipefail
+          git checkout -B uat-ephemeral origin/uat
+          if [ -n "${{ steps.collect.outputs.pairs }}" ]; then
+            IFS=',' read -ra ITEMS <<< "${{ steps.collect.outputs.pairs }}"
+            for item in "${ITEMS[@]}"; do
+              num="${item%% *}"
+              sha="${item##* }"
+              echo "Cherry-picking PR #$num ($sha)"
+              parents=$(git cat-file -p "$sha" | grep -c '^parent ' || true)
+              if [ "$parents" -ge 2 ]; then
+                git cherry-pick -x -m 1 "$sha"
+              else
+                git cherry-pick -x "$sha"
+              fi
+            done
+          else
+            echo "No PRs to cherry-pick; building plain UAT."
+          fi
+
+      - name: Set Docker tag
+        id: settag
+        shell: bash
+        run: |
+          TS=$(date -u +%Y%m%d-%H%M%S)
+          PRS="${{ steps.collect.outputs.prs }}"
+          if [ -z "$PRS" ]; then
+            TAG="uat-${TS}-none"
+          else
+            TAG="uat-${TS}-prs-$(echo "$PRS" | tr ',' '_' )"
+          fi
+          echo "docker_tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Using docker tag: $TAG"
+
+      - name: Docker login
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build & push UAT image (ephemeral state)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            apexdev23/sms-gw:${{ steps.settag.outputs.docker_tag }}
+            apexdev23/sms-gw:latest-uat
+
+  deploy-uat:
+    needs: build-uat-ephemeral
+    runs-on: [self-hosted, uat]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Docker login on server
+        run: |
+          echo ${{ secrets.DOCKERHUB_TOKEN }} | docker login -u ${{ secrets.DOCKERHUB_USERNAME }} --password-stdin
+      - name: Deploy App
+        run: |
+          cd ~/sms-gw
+          ./deploy.sh ${{ needs.build-uat-ephemeral.outputs.docker_tag }}
