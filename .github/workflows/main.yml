@@ -1,4 +1,4 @@
-name: Docker CI/CD
+name: CI/CD (main & dev)
 
 on:
   workflow_run:
@@ -9,8 +9,9 @@ permissions:
   contents: read
 
 jobs:
+  # Build for main/dev (skip when upstream run was on UAT)
   build-and-push:
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch != 'uat' }}
     runs-on: ubuntu-latest
     outputs:
       docker_tag: ${{ steps.env.outputs.docker_tag }}
@@ -25,9 +26,10 @@ jobs:
         id: tag
         shell: bash
         run: |
+          set -euo pipefail
           git fetch --tags --force
           BR="${{ github.event.workflow_run.head_branch }}"
-          # Expect tags like: main-v1.2.3, uat-v1.2.3, develop-v1.2.3
+          # Expect tags like: main-v1.2.3, develop-v1.2.3, uat-v1.2.3
           TAG=$(git tag --sort=-creatordate | grep -E "^(${BR})-v[0-9]+\.[0-9]+\.[0-9]+$" | head -n 1 || true)
           if [ -z "$TAG" ]; then
             echo "No matching tag found for branch '$BR'." >&2
@@ -60,27 +62,9 @@ jobs:
     runs-on: [self-hosted, main]
     steps:
       - uses: actions/checkout@v4
-
       - name: Docker login on server
         run: |
           echo ${{ secrets.DOCKERHUB_TOKEN }} | docker login -u ${{ secrets.DOCKERHUB_USERNAME }} --password-stdin
-
-      - name: Deploy App
-        run: |
-          cd ~/sms-gw
-          ./deploy.sh ${{ needs.build-and-push.outputs.docker_tag }}
-
-  deploy-uat:
-    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'uat' }}
-    needs: build-and-push
-    runs-on: [self-hosted, uat]
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Docker login on server
-        run: |
-          echo ${{ secrets.DOCKERHUB_TOKEN }} | docker login -u ${{ secrets.DOCKERHUB_USERNAME }} --password-stdin
-
       - name: Deploy App
         run: |
           cd ~/sms-gw
@@ -92,11 +76,9 @@ jobs:
     runs-on: [self-hosted, dev]
     steps:
       - uses: actions/checkout@v4
-
       - name: Docker login on server
         run: |
           echo ${{ secrets.DOCKERHUB_TOKEN }} | docker login -u ${{ secrets.DOCKERHUB_USERNAME }} --password-stdin
-
       - name: Deploy App
         run: |
           cd ~/sms-gw
