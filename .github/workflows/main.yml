@@ -1,13 +1,7 @@
-name: Docker CI/CD
-
 on:
   workflow_run:
     workflows: ["Auto Tag from Merge"]
-    types:
-      - completed
-
-permissions:
-  contents: read
+    types: [completed]
 
 jobs:
   build-and-push:
@@ -16,8 +10,11 @@ jobs:
     outputs:
       docker_tag: ${{ steps.env.outputs.docker_tag }}
     steps:
-      - name: Checkout code
+      - name: Checkout code of triggering run
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0  # so tags are available
 
       - name: Fetch tags and get latest
         id: tag
@@ -48,48 +45,42 @@ jobs:
             apexdev23/sms-gw:latest
 
   deploy-main:
-    if: github.ref == 'refs/heads/main'
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main' }}
     needs: build-and-push
     runs-on: [self-hosted, main]
     steps:
       - uses: actions/checkout@v4
-      
       - name: Docker login on server
         run: |
           echo ${{ secrets.DOCKERHUB_TOKEN }} | docker login -u ${{ secrets.DOCKERHUB_USERNAME }} --password-stdin
-
       - name: Deploy App
         run: |
           cd ~/sms-gw
           ./deploy.sh ${{ needs.build-and-push.outputs.docker_tag }}
 
   deploy-uat:
-    if: github.ref == 'refs/heads/uat'
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'uat' }}
     needs: build-and-push
     runs-on: [self-hosted, uat]
     steps:
       - uses: actions/checkout@v4
-      
       - name: Docker login on server
         run: |
           echo ${{ secrets.DOCKERHUB_TOKEN }} | docker login -u ${{ secrets.DOCKERHUB_USERNAME }} --password-stdin
-
       - name: Deploy App
         run: |
           cd ~/sms-gw
           ./deploy.sh ${{ needs.build-and-push.outputs.docker_tag }}
 
   deploy-dev:
-    if: github.ref == 'refs/heads/develop'
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'develop' }}
     needs: build-and-push
     runs-on: [self-hosted, dev]
     steps:
       - uses: actions/checkout@v4
-      
       - name: Docker login on server
         run: |
           echo ${{ secrets.DOCKERHUB_TOKEN }} | docker login -u ${{ secrets.DOCKERHUB_USERNAME }} --password-stdin
-
       - name: Deploy App
         run: |
           cd ~/sms-gw
