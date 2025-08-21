@@ -1,7 +1,9 @@
 name: UAT Deploy (pick labeled PRs)
 
 on:
-  workflow_dispatch: {}
+  workflow_run:
+    workflows: ["Auto Tag from Merge"]
+    types: [completed]
 
 permissions:
   contents: read
@@ -12,7 +14,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build-uat-ephemeral:
+  build-and-push-uat:
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'uat' }}
     runs-on: ubuntu-latest
     outputs:
       docker_tag: ${{ steps.settag.outputs.docker_tag }}
@@ -20,12 +23,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
 
       - name: Configure Git identity (needed for cherry-pick)
         run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name github-actions
+          git config user.email github-actions@github.com
 
       - name: Ensure jq is available
         run: |
@@ -102,14 +106,17 @@ jobs:
         id: settag
         shell: bash
         run: |
-          TS=$(date -u +%Y%m%d-%H%M%S)
-          PRS="${{ steps.collect.outputs.prs }}"
-          if [ -z "$PRS" ]; then
-            TAG="uat-${TS}-none"
-          else
-            TAG="uat-${TS}-prs-$(echo "$PRS" | tr ',' '_' )"
+          set -euo pipefail
+          git fetch --tags --force
+          BR="${{ github.event.workflow_run.head_branch }}"
+          # Expect tags like: main-v1.2.3, develop-v1.2.3, uat-v1.2.3
+          TAG=$(git tag --sort=-creatordate | grep -E "^(${BR})-v[0-9]+\.[0-9]+\.[0-9]+$" | head -n 1 || true)
+          if [ -z "$TAG" ]; then
+            echo "No matching tag found for branch '$BR'." >&2
+            exit 1
           fi
-          echo "docker_tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "docker_tag=${{ steps.tag.outputs.tag }}" >> "$GITHUB_OUTPUT"
           echo "Using docker tag: $TAG"
 
       - name: Docker login
@@ -128,7 +135,7 @@ jobs:
             apexdev23/sms-gw:latest-uat
 
   deploy-uat:
-    needs: build-uat-ephemeral
+    needs: build-and-push-uat
     runs-on: [self-hosted, uat]
     steps:
       - uses: actions/checkout@v4
