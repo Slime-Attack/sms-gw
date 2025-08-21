@@ -19,6 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       docker_tag: ${{ steps.settag.outputs.docker_tag }}
+      should_deploy: ${{ steps.collect.outputs.has_prs }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -39,7 +40,7 @@ jobs:
       - name: Collect merged PRs labeled promote:uat not yet in UAT
         id: collect
         env:
-          GH_TOKEN: ${{ github.token }}   # same as secrets.GITHUB_TOKEN
+          GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
         shell: bash
         run: |
@@ -47,15 +48,12 @@ jobs:
           BASE=uat
           git fetch origin "$BASE" --prune --tags
 
-          # Get merged PRs with label and base develop
+          # Merged PRs to develop with the label
           gh pr list --repo "$REPO" --state merged \
             --search 'label:"promote:uat" base:develop' --limit 200 \
             --json number,mergeCommit,mergedAt \
-            | jq -r '
-                map(select(.mergeCommit != null))
-                | sort_by(.mergedAt)
-                | .[] | "\(.number) \(.mergeCommit.oid) \(.mergedAt)"' \
-            > /tmp/all.txt
+          | jq -r 'map(select(.mergeCommit != null)) | sort_by(.mergedAt) | .[] | "\(.number) \(.mergeCommit.oid) \(.mergedAt)"' \
+          > /tmp/all.txt
 
           : > /tmp/todo.txt
           while read -r num sha mergedAt; do
@@ -68,61 +66,107 @@ jobs:
           done < /tmp/all.txt
 
           if [ -s /tmp/todo.txt ]; then
-            echo "To cherry-pick:"
-            cat /tmp/todo.txt
-            echo "pairs=$(paste -sd, /tmp/todo.txt)" >> "$GITHUB_OUTPUT"
-            echo "prs=$(cut -d' ' -f1 /tmp/todo.txt | paste -sd, -)" >> "$GITHUB_OUTPUT"
+            paste -sd, /tmp/todo.txt | sed 's/^/pairs=/' >> "$GITHUB_OUTPUT"
+            cut -d' ' -f1 /tmp/todo.txt | paste -sd, - | sed 's/^/prs=/' >> "$GITHUB_OUTPUT"
+            echo "has_prs=true" >> "$GITHUB_OUTPUT"
+            echo "PRs to cherry-pick:"; cat /tmp/todo.txt
           else
             echo "pairs=" >> "$GITHUB_OUTPUT"
             echo "prs=" >> "$GITHUB_OUTPUT"
+            echo "has_prs=false" >> "$GITHUB_OUTPUT"
             echo "No new labeled PRs to include."
           fi
 
       - name: Prepare ephemeral UAT composition
+        id: pick
+        if: ${{ steps.collect.outputs.has_prs == 'true' }}
         shell: bash
+        env:
+          BASE_BRANCH: uat
+          DEV_BRANCH: develop
         run: |
           set -euo pipefail
-          git checkout -B uat-ephemeral origin/uat
-          if [ -n "${{ steps.collect.outputs.pairs }}" ]; then
-            IFS=',' read -ra ITEMS <<< "${{ steps.collect.outputs.pairs }}"
-            for item in "${ITEMS[@]}"; do
-              num="${item%% *}"
-              sha="${item##* }"
-              echo "Cherry-picking PR #$num ($sha)"
-              parents=$(git cat-file -p "$sha" | grep -c '^parent ' || true)
-              if [ "$parents" -ge 2 ]; then
-                git cherry-pick -x -m 1 "$sha"
+          git checkout -B uat-ephemeral "origin/${BASE_BRANCH}"
+          git fetch origin "${DEV_BRANCH}" --prune
+
+          INCLUDED=(); SKIPPED=()
+          IFS=',' read -ra ITEMS <<< "${{ steps.collect.outputs.pairs }}"
+          for item in "${ITEMS[@]}"; do
+            num="${item%% *}"; sha="${item##* }"
+            echo ""
+            echo "=== PR #$num ($sha) ==="
+
+            git fetch --no-tags --force origin "$sha" || true
+
+            if git merge-base --is-ancestor "$sha" HEAD; then
+              echo "Already included; skipping."
+              INCLUDED+=("$num"); continue
+            fi
+
+            parents=( $(git cat-file -p "$sha" | awk '/^parent /{print $2}') )
+            pcount=${#parents[@]}
+            if [ "$pcount" -ge 2 ]; then
+              mparent=1
+              for i in "${!parents[@]}"; do
+                if git merge-base --is-ancestor "${parents[$i]}" "origin/${DEV_BRANCH}"; then
+                  mparent=$((i+1)); break
+                fi
+              done
+              echo "Merge commit; using -m $mparent (develop parent)."
+              if git cherry-pick -x -m "$mparent" "$sha"; then
+                INCLUDED+=("$num")
               else
-                git cherry-pick -x "$sha"
+                echo "Conflict; aborting this pick."
+                git cherry-pick --abort || true
+                SKIPPED+=("$num")
               fi
-            done
-          else
-            echo "No PRs to cherry-pick; building plain UAT."
-          fi
+            else
+              echo "Single-parent; simple cherry-pick."
+              if git cherry-pick -x "$sha"; then
+                INCLUDED+=("$num")
+              else
+                echo "Conflict; aborting this pick."
+                git cherry-pick --abort || true
+                SKIPPED+=("$num")
+              fi
+            fi
+          done
+
+          echo "included=$(IFS=,; echo "${INCLUDED[*]-}")" >> "$GITHUB_OUTPUT"
+          echo "skipped=$(IFS=,; echo "${SKIPPED[*]-}")" >> "$GITHUB_OUTPUT"
+
+      - name: Show pick summary
+        if: ${{ steps.collect.outputs.has_prs == 'true' }}
+        run: |
+          echo "Included PRs: ${{ steps.pick.outputs.included }}"
+          echo "Skipped  PRs: ${{ steps.pick.outputs.skipped }}"
 
       - name: Set Docker tag
         id: settag
+        if: ${{ steps.collect.outputs.has_prs == 'true' }}
         shell: bash
         run: |
           set -euo pipefail
           git fetch --tags --force
           BR="${{ github.event.workflow_run.head_branch }}"
-          # Expect tags like: main-v1.2.3, develop-v1.2.3, uat-v1.2.3
           TAG=$(git tag --sort=-creatordate | grep -E "^(${BR})-v[0-9]+\.[0-9]+\.[0-9]+$" | head -n 1 || true)
-          if [ -z "$TAG" ]; then
-            echo "No matching tag found for branch '$BR'." >&2
-            exit 1
+          if [ -z "${TAG:-}" ]; then
+            SHORT_SHA="$(git rev-parse --short=7 ${{ github.event.workflow_run.head_sha }})"
+            TAG="uat-$(date -u +%Y%m%d)-${SHORT_SHA}"
+            echo "No semver tag for '${BR}'. Fallback: ${TAG}"
           fi
-          echo "docker_tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "Using docker tag: $TAG"
+          echo "docker_tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Using docker tag: ${TAG}"
 
       - name: Docker login
+        if: ${{ steps.collect.outputs.has_prs == 'true' }}
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build & push UAT image (ephemeral state)
+        if: ${{ steps.collect.outputs.has_prs == 'true' }}
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -133,13 +177,25 @@ jobs:
 
   deploy-uat:
     needs: build-and-push-uat
+    if: ${{ needs.build-and-push-uat.outputs.should_deploy == 'true' }}
     runs-on: [self-hosted, uat]
     steps:
       - uses: actions/checkout@v4
+
       - name: Docker login on server
+        shell: bash
         run: |
           echo ${{ secrets.DOCKERHUB_TOKEN }} | docker login -u ${{ secrets.DOCKERHUB_USERNAME }} --password-stdin
+
+      - name: Show image tag
+        shell: bash
+        run: |
+          echo "Deploying tag: ${{ needs.build-and-push-uat.outputs.docker_tag }}"
+
       - name: Deploy App
+        shell: bash
         run: |
           cd ~/sms-gw
           ./deploy.sh ${{ needs.build-and-push-uat.outputs.docker_tag }}
+
+
