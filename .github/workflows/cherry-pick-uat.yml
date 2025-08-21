@@ -6,7 +6,7 @@ on:
     types: [completed]
 
 permissions:
-  contents: write
+  contents: write      # needed to push branches, merge to uat, and move tags
   pull-requests: read
 
 concurrency:
