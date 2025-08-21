@@ -6,7 +6,7 @@ on:
     types: [completed]
 
 permissions:
-  contents: write        # needed to push/move the uat-{version} tag
+  contents: write
   pull-requests: read
 
 concurrency:
@@ -68,7 +68,7 @@ jobs:
           set -euo pipefail
 
           if [ -n "${{ steps.lasttag.outputs.last_uat_date }}" ]; then
-            GH_SEARCH="label:\"promote:uat\" base:develop merged:>=$${{ steps.lasttag.outputs.last_uat_date }}"
+            GH_SEARCH="label:\"promote:uat\" base:develop merged:>=${{ steps.lasttag.outputs.last_uat_date }}"
           else
             GH_SEARCH="label:\"promote:uat\" base:develop"
           fi
@@ -146,6 +146,7 @@ jobs:
       - name: Show image tag and PRs
         shell: bash
         run: |
+          set -euo pipefail
           echo "Deploying tag: ${{ needs.build-and-push-uat.outputs.docker_tag }}"
           echo "PRs included: ${{ needs.build-and-push-uat.outputs.prs }}"
 
