@@ -14,7 +14,7 @@ import (
 )
 
 func main() {
-	fmt.Println("Starting server...")
+	fmt.Println("Starting test server...")
 
 	logrus.SetFormatter(&logrus.TextFormatter{FullTimestamp: true})
 
@@ -48,8 +48,8 @@ func main() {
 	r := gin.Default()
 
 	r.GET("/send", func(c *gin.Context) {
-		logrus.Infof("Hello, World! test")
-		c.JSON(http.StatusOK, gin.H{"message": "Hello, World! Jimmy 2 again"})
+		logrus.Infof("Hello, World!")
+		c.JSON(http.StatusOK, gin.H{"message": "Hello, World! test"})
 	})
 
 	r.Run(":8080")
