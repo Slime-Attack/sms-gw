@@ -31,10 +31,10 @@ jobs:
           git config user.name github-actions
           git config user.email github-actions@github.com
 
-      - name: Ensure jq is available
+      - name: Ensure jq and gh are available
         run: |
           sudo apt-get update
-          sudo apt-get install -y jq
+          sudo apt-get install -y jq gh
 
       - name: Collect merged PRs labeled promote:uat not yet in UAT
         id: collect
@@ -54,14 +54,12 @@ jobs:
             | jq -r '
                 map(select(.mergeCommit != null))
                 | sort_by(.mergedAt)
-                | .[]
-                | "\(.number) \(.mergeCommit.oid) \(.mergedAt)"' \
+                | .[] | "\(.number) \(.mergeCommit.oid) \(.mergedAt)"' \
             > /tmp/all.txt
 
           : > /tmp/todo.txt
           while read -r num sha mergedAt; do
             [ -z "${num:-}" ] && continue
-            # Skip if already contained in origin/uat
             if git merge-base --is-ancestor "$sha" "origin/$BASE"; then
               echo "PR #$num already in $BASE"
             else
@@ -115,8 +113,7 @@ jobs:
             echo "No matching tag found for branch '$BR'." >&2
             exit 1
           fi
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "docker_tag=${{ steps.tag.outputs.tag }}" >> "$GITHUB_OUTPUT"
+          echo "docker_tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "Using docker tag: $TAG"
 
       - name: Docker login
@@ -145,4 +142,4 @@ jobs:
       - name: Deploy App
         run: |
           cd ~/sms-gw
-          ./deploy.sh ${{ needs.build-uat-ephemeral.outputs.docker_tag }}
+          ./deploy.sh ${{ needs.build-and-push-uat.outputs.docker_tag }}
