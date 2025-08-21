@@ -48,8 +48,8 @@ func main() {
 	r := gin.Default()
 
 	r.GET("/send", func(c *gin.Context) {
-		logrus.Infof("Hello, World!")
-		c.JSON(http.StatusOK, gin.H{"message": "Hello, World Jimmy"})
+		logrus.Infof("Hello, World! test")
+		c.JSON(http.StatusOK, gin.H{"message": "Hello, World! Jimmy 2 again"})
 	})
 
 	r.Run(":8080")
