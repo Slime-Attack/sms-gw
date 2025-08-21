@@ -14,7 +14,7 @@ import (
 )
 
 func main() {
-	fmt.Println("Starting test server...")
+	fmt.Println("Starting server...")
 
 	logrus.SetFormatter(&logrus.TextFormatter{FullTimestamp: true})
 
