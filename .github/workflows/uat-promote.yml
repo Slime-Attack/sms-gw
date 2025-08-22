@@ -129,8 +129,15 @@ jobs:
 
           git push -f origin uat-candidate
 
+      - name: Authenticate gh with GITHUB_TOKEN
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: echo "$GH_TOKEN" | gh auth login --with-token
+
       - name: Create or update PR uat-candidate -> uat
         id: uat_pr
+        env:
+          GH_TOKEN: ${{ github.token }}   
         shell: bash
         run: |
           set -euo pipefail
