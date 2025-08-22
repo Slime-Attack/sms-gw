@@ -48,6 +48,7 @@ func main() {
 	r := gin.Default()
 
 	r.GET("/send", func(c *gin.Context) {
+		logrus.Info("Received request")
 		c.JSON(http.StatusOK, gin.H{"message": "Hello, World!"})
 	})
 
