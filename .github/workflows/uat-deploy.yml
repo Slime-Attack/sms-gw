@@ -1,0 +1,87 @@
+name: CI/CD UAT Deploy
+
+on:
+  push:
+    branches: [ "uat" ]
+
+permissions:
+  contents: write   # move/create tags
+
+concurrency:
+  group: uat-deploy
+  cancel-in-progress: false
+
+jobs:
+  build-and-deploy:
+    runs-on: [self-hosted, uat]   # if you build on GitHub-hosted, change to ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # If running on GitHub-hosted, keep login here; on self-hosted, still fine.
+      - name: Docker login
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Ensure Buildx uses docker-container driver so cache-to/from: gha works
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          install: true
+          driver: docker-container
+
+      - name: Determine next UAT tag (uat-vX.Y.Z)
+        id: tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --tags --force
+          LAST="$(git tag --list 'uat-v*' | sort -V | tail -n1 || true)"
+          if [ -z "$LAST" ]; then
+            NEXT="uat-v0.1.0"
+          else
+            base="${LAST#uat-v}"
+            IFS='.' read -r X Y Z <<< "$base"
+            Z=$((Z+1))
+            NEXT="uat-v${X}.${Y}.${Z}"
+          fi
+          echo "docker_tag=$NEXT" >> "$GITHUB_OUTPUT"
+          echo "Using UAT tag: $NEXT"
+
+      - name: Build & push UAT image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          tags: |
+            apexdev23/sms-gw:${{ steps.tag.outputs.docker_tag }}
+            apexdev23/sms-gw:latest-uat
+
+      - name: Deploy App
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd ~/sms-gw
+          ./deploy.sh ${{ steps.tag.outputs.docker_tag }}
+
+      - name: Move/Create UAT tag to current uat HEAD
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --tags --force
+          git tag -f "${{ steps.tag.outputs.docker_tag }}" "$(git rev-parse HEAD)"
+          git push origin "${{ steps.tag.outputs.docker_tag }}" --force
+
+      - name: Summary
+        shell: bash
+        run: |
+          {
+            echo "### UAT Deploy"
+            echo "- Tag: \`${{ steps.tag.outputs.docker_tag }}\`"
+            echo "- Image: \`apexdev23/sms-gw:${{ steps.tag.outputs.docker_tag }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
