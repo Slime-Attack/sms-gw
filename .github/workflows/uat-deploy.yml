@@ -116,13 +116,20 @@ jobs:
           set -euo pipefail
           git fetch origin uat
           git checkout -B uat-candidate origin/uat
-
+      
           while read commit; do
             [ -z "$commit" ] && continue
             echo "Cherry-picking $commit"
-            git cherry-pick "$commit" || exit 1
+            
+            # Check if this is a merge commit (has two parents)
+            if git show --no-patch --format="%P" "$commit" | grep -q " "; then
+              echo "This is a merge commit, using mainline parent (-m 1)"
+              git cherry-pick -m 1 "$commit" || exit 1
+            else
+              git cherry-pick "$commit" || exit 1
+            fi
           done < commits.txt
-
+      
           git push origin uat-candidate --force
 
       - name: Set Docker tag
