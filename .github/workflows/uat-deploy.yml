@@ -52,21 +52,30 @@ jobs:
             --json number \
             | jq -r '.[].number' > prs.txt
 
-          # Collect commit SHAs: prefer mergeCommit, else headRefOid (squash/rebase)
-          gh pr list --repo "$REPO" --state merged --search "$SEARCH" \
-            --json number,mergeCommit,headRefOid \
-            | jq -r '.[] | .mergeCommit // .headRefOid' > commits.txt
-
-          if [ -s prs.txt ]; then
-            PRS=$(paste -sd, prs.txt)
-            echo "prs=$PRS" >> "$GITHUB_OUTPUT"
-            echo "has_prs=true" >> "$GITHUB_OUTPUT"
-            echo "PRs to promote: $PRS"
-          else
+          if [ ! -s prs.txt ]; then
             echo "prs=" >> "$GITHUB_OUTPUT"
             echo "has_prs=false" >> "$GITHUB_OUTPUT"
             echo "No PRs found for UAT promotion."
+            exit 0
           fi
+
+          PRS=$(paste -sd, prs.txt)
+          echo "prs=$PRS" >> "$GITHUB_OUTPUT"
+          echo "has_prs=true" >> "$GITHUB_OUTPUT"
+          echo "PRs to promote: $PRS"
+
+          # Collect commit SHAs cleanly
+          > commits.txt
+          while read pr; do
+            COMMIT=$(gh pr view "$pr" --repo "$REPO" --json mergeCommit,headRefOid \
+              | jq -r '.mergeCommit // .headRefOid')
+            if [ -n "$COMMIT" ] && [ "$COMMIT" != "null" ]; then
+              echo "$COMMIT" >> commits.txt
+            fi
+          done < prs.txt
+
+          echo "Collected commits:"
+          cat commits.txt
 
       - name: Build uat-candidate branch
         if: ${{ steps.collect.outputs.has_prs == 'true' }}
