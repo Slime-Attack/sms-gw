@@ -1,87 +1,195 @@
-name: CI/CD UAT Deploy
+name: UAT Deploy (label-gated)
 
 on:
-  push:
-    branches: [ "uat" ]
+  workflow_run:
+    workflows: ["Auto Tag from Merge"]
+    types: [completed]
 
 permissions:
-  contents: write   # move/create tags
+  contents: write
+  pull-requests: read
 
 concurrency:
-  group: uat-deploy
-  cancel-in-progress: false
+  group: uat
+  cancel-in-progress: true
 
 jobs:
-  build-and-deploy:
-    runs-on: [self-hosted, uat]   # if you build on GitHub-hosted, change to ubuntu-latest
+  build-and-push-uat:
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'uat' }}
+    runs-on: ubuntu-latest
+    outputs:
+      should_deploy: ${{ steps.collect.outputs.has_prs }}
+      prs: ${{ steps.collect.outputs.prs }}
+      docker_tag: ${{ steps.settag.outputs.docker_tag }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # If running on GitHub-hosted, keep login here; on self-hosted, still fine.
+      - name: Ensure jq and gh are available
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y jq gh
+
+      - name: Determine last UAT deploy tag (uat-vX.Y.Z)
+        id: lasttag
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --prune --tags origin
+          git fetch origin develop --prune
+          git fetch origin uat --prune
+
+          # Most recent semver-like UAT tag
+          LAST_UAT_TAG="$(git tag --sort=-creatordate | grep -E '^uat-v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)"
+          if [ -n "${LAST_UAT_TAG:-}" ]; then
+            echo "last_uat_tag=${LAST_UAT_TAG}" >> "$GITHUB_OUTPUT"
+            # Use the commit time of the tag's target as lower bound (UTC date)
+            LAST_TS_EPOCH="$(git log -1 --format=%ct "${LAST_UAT_TAG}")"
+            LAST_TS_DATE="$(date -u -d "@${LAST_TS_EPOCH}" +%Y-%m-%d)"
+            echo "last_uat_date=${LAST_TS_DATE}" >> "$GITHUB_OUTPUT"
+            echo "Found last UAT tag: ${LAST_UAT_TAG} (UTC date ${LAST_TS_DATE})"
+          else
+            echo "No previous uat-v* tag found; treating as first UAT deploy."
+            echo "last_uat_tag=" >> "$GITHUB_OUTPUT"
+            echo "last_uat_date=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Collect labeled PRs merged since last UAT deploy
+        id: collect
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -n "${{ steps.lasttag.outputs.last_uat_date }}" ]; then
+            GH_SEARCH="label:\"promote:uat\" base:develop merged:>=${{ steps.lasttag.outputs.last_uat_date }}"
+          else
+            GH_SEARCH="label:\"promote:uat\" base:develop"
+          fi
+
+          echo "Search query: ${GH_SEARCH}"
+          gh pr list --repo "$REPO" --state merged \
+            --search "${GH_SEARCH}" --limit 200 \
+            --json number,mergedAt \
+          | jq -r 'map(select(.mergedAt != null)) | sort_by(.mergedAt) | .[].number' > /tmp/prs.txt
+
+          if [ -s /tmp/prs.txt ]; then
+            PRS_CSV="$(paste -sd, /tmp/prs.txt)"
+            echo "prs=${PRS_CSV}" >> "$GITHUB_OUTPUT"
+            echo "has_prs=true" >> "$GITHUB_OUTPUT"
+            echo "PRs to deploy since last UAT tag: ${PRS_CSV}"
+          else
+            echo "prs=" >> "$GITHUB_OUTPUT"
+            echo "has_prs=false" >> "$GITHUB_OUTPUT"
+            echo "No new labeled PRs since last UAT tag."
+          fi
+
+      - name: Checkout UAT head (build source)
+        if: ${{ steps.collect.outputs.has_prs == 'true' }}
+        uses: actions/checkout@v4
+        with:
+          ref: uat
+          fetch-depth: 0
+
+      - name: Set Docker tag (must be uat-vX.Y.Z)
+        id: settag
+        if: ${{ steps.collect.outputs.has_prs == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --tags --force
+          # Use latest semver tag for UAT version
+          TAG="$(git tag --sort=-creatordate | grep -E '^uat-v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)"
+          if [ -z "${TAG:-}" ]; then
+            echo "ERROR: No semver UAT tag (uat-vX.Y.Z) found. Please create one before deploying." >&2
+            exit 1
+          fi
+          echo "docker_tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Using docker tag: ${TAG}"
+
       - name: Docker login
+        if: ${{ steps.collect.outputs.has_prs == 'true' }}
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # Ensure Buildx uses docker-container driver so cache-to/from: gha works
-      - name: Set up Buildx
-        uses: docker/setup-buildx-action@v3
-        with:
-          install: true
-          driver: docker-container
-
-      - name: Determine next UAT tag (uat-vX.Y.Z)
-        id: tag
-        shell: bash
-        run: |
-          set -euo pipefail
-          git fetch --tags --force
-          LAST="$(git tag --list 'uat-v*' | sort -V | tail -n1 || true)"
-          if [ -z "$LAST" ]; then
-            NEXT="uat-v0.1.0"
-          else
-            base="${LAST#uat-v}"
-            IFS='.' read -r X Y Z <<< "$base"
-            Z=$((Z+1))
-            NEXT="uat-v${X}.${Y}.${Z}"
-          fi
-          echo "docker_tag=$NEXT" >> "$GITHUB_OUTPUT"
-          echo "Using UAT tag: $NEXT"
-
-      - name: Build & push UAT image
+      - name: Build & push UAT image from uat HEAD
+        if: ${{ steps.collect.outputs.has_prs == 'true' }}
         uses: docker/build-push-action@v5
         with:
           context: .
           push: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
           tags: |
-            apexdev23/sms-gw:${{ steps.tag.outputs.docker_tag }}
+            apexdev23/sms-gw:${{ steps.settag.outputs.docker_tag }}
             apexdev23/sms-gw:latest-uat
+
+  deploy-uat:
+    needs: build-and-push-uat
+    if: ${{ needs.build-and-push-uat.outputs.should_deploy == 'true' }}
+    runs-on: [self-hosted, uat]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Docker login on server
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo ${{ secrets.DOCKERHUB_TOKEN }} | docker login -u ${{ secrets.DOCKERHUB_USERNAME }} --password-stdin
+
+      - name: Show image tag and PRs
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Deploying tag: ${{ needs.build-and-push-uat.outputs.docker_tag }}"
+          echo "PRs included: ${{ needs.build-and-push-uat.outputs.prs }}"
 
       - name: Deploy App
         shell: bash
         run: |
           set -euo pipefail
           cd ~/sms-gw
-          ./deploy.sh ${{ steps.tag.outputs.docker_tag }}
+          ./deploy.sh ${{ needs.build-and-push-uat.outputs.docker_tag }}
 
-      - name: Move/Create UAT tag to current uat HEAD
+      - name: Update UAT tag (uat-{version})
+        if: ${{ success() }}
         shell: bash
         run: |
           set -euo pipefail
-          git fetch --tags --force
-          git tag -f "${{ steps.tag.outputs.docker_tag }}" "$(git rev-parse HEAD)"
-          git push origin "${{ steps.tag.outputs.docker_tag }}" --force
+          git fetch --prune --tags origin
+          git checkout uat
 
-      - name: Summary
+          VERSION_TAG="${{ needs.build-and-push-uat.outputs.docker_tag }}"
+
+          # Enforce expected format uat-vX.Y.Z
+          if [[ ! "$VERSION_TAG" =~ ^uat-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "ERROR: Expected semver-style tag (uat-vX.Y.Z), got: $VERSION_TAG" >&2
+            exit 1
+          fi
+
+          echo "Moving tag $VERSION_TAG -> current uat HEAD"
+          git tag -f "$VERSION_TAG"
+          git push origin "$VERSION_TAG" --force
+
+      # Optional: remove the label from PRs that just triggered this deploy
+      - name: Remove promote:uat label from deployed PRs
+        if: ${{ success() && needs.build-and-push-uat.outputs.prs != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
         shell: bash
         run: |
-          {
-            echo "### UAT Deploy"
-            echo "- Tag: \`${{ steps.tag.outputs.docker_tag }}\`"
-            echo "- Image: \`apexdev23/sms-gw:${{ steps.tag.outputs.docker_tag }}\`"
-          } >> "$GITHUB_STEP_SUMMARY"
+          set -euo pipefail
+          sudo apt-get update && sudo apt-get install -y gh
+          IFS=',' read -ra arr <<< "${{ needs.build-and-push-uat.outputs.prs }}"
+          for num in "${arr[@]}"; do
+            [ -z "$num" ] && continue
+            echo "Removing label from PR #$num"
+            gh pr edit "$num" --remove-label "promote:uat" --repo "$REPO" || true
+          done
