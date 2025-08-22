@@ -35,80 +35,57 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-
+      
           git fetch --tags origin
           LAST_TAG=$(git tag --sort=-creatordate | grep '^uat-v' | head -n1 || true)
-
-          if [ -n "$LAST_TAG" ]; then
-            DATE=$(git log -1 --format=%ct "$LAST_TAG")
-            SINCE=$(date -u -d "@$DATE" +%Y-%m-%d)
-            SEARCH="label:\"promote:uat\" base:develop merged:>=$SINCE"
-          else
-            SEARCH="label:\"promote:uat\" base:develop"
-          fi
-
-          echo "Search query: $SEARCH"
-
-          # Collect PR numbers
-          gh pr list --repo "$REPO" --state merged --search "$SEARCH" \
-            --json number | jq -r '.[].number' > prs.txt
-
-          if [ ! -s prs.txt ]; then
+      
+          # Get all PRs with promote:uat label
+          gh pr list --repo "$REPO" --state merged --label "promote:uat" \
+            --json number,mergeCommit,baseRefName | jq -r '.[] | select(.baseRefName == "develop") | "\(.number) \(.mergeCommit.oid)"' > all_uat_prs.txt
+      
+          if [ ! -s all_uat_prs.txt ]; then
             echo "prs=" >> "$GITHUB_OUTPUT"
             echo "has_prs=false" >> "$GITHUB_OUTPUT"
-            echo "No PRs found for UAT promotion."
+            echo "No PRs found with promote:uat label."
             exit 0
           fi
-
-          PRS=$(paste -sd, prs.txt)
+      
+          # Filter out PRs already in last UAT deployment
+          > prs_to_deploy.txt
+          > commits.txt
+          
+          while read line; do
+            [ -z "$line" ] && continue
+            PR_NUMBER=$(echo "$line" | cut -d' ' -f1)
+            MERGE_COMMIT=$(echo "$line" | cut -d' ' -f2)
+            
+            if [ -n "$LAST_TAG" ]; then
+              # Check if this PR's merge commit is in the last tag's history
+              if git tag --contains "$MERGE_COMMIT" | grep -q "^uat-v"; then
+                echo "PR #$PR_NUMBER already deployed in previous UAT version, skipping"
+                continue
+              fi
+            fi
+            
+            echo "PR #$PR_NUMBER needs deployment"
+            echo "$PR_NUMBER" >> prs_to_deploy.txt
+            echo "$MERGE_COMMIT" >> commits.txt
+          done < all_uat_prs.txt
+      
+          if [ ! -s prs_to_deploy.txt ]; then
+            echo "prs=" >> "$GITHUB_OUTPUT"
+            echo "has_prs=false" >> "$GITHUB_OUTPUT"
+            echo "No new PRs found for UAT promotion since last deployment."
+            exit 0
+          fi
+      
+          PRS=$(paste -sd, prs_to_deploy.txt)
           echo "prs=$PRS" >> "$GITHUB_OUTPUT"
           echo "has_prs=true" >> "$GITHUB_OUTPUT"
           echo "PRs to promote: $PRS"
-
-          # Improved commit SHA collection
-          > commits.txt
-          while read pr; do
-            [ -z "$pr" ] && continue
-            
-            echo "Processing PR #$pr"
-            
-            # Try to get merge commit first
-            MERGE_SHA=$(gh pr view "$pr" --repo "$REPO" --json mergeCommit -q '.mergeCommit.oid' 2>/dev/null || true)
-            
-            if [ -n "$MERGE_SHA" ] && [ "$MERGE_SHA" != "null" ]; then
-              echo "Using merge commit: $MERGE_SHA"
-              echo "$MERGE_SHA" >> commits.txt
-              continue
-            fi
-
-            # Fallback to head commit
-            HEAD_SHA=$(gh pr view "$pr" --repo "$REPO" --json commits -q '.commits[-1].oid' 2>/dev/null || true)
-            
-            if [ -n "$HEAD_SHA" ] && [ "$HEAD_SHA" != "null" ]; then
-              echo "Using head commit: $HEAD_SHA"
-              echo "$HEAD_SHA" >> commits.txt
-            else
-              echo "Warning: Could not find commit for PR #$pr"
-            fi
-          done < prs.txt
-
+      
           echo "Collected commits:"
           cat commits.txt
-
-          # Verify we have valid commit SHAs
-          if [ -s commits.txt ]; then
-            while read commit; do
-              if [ -n "$commit" ] && git rev-parse --verify "$commit" >/dev/null 2>&1; then
-                echo "Valid commit: $commit"
-              else
-                echo "Error: Invalid commit SHA found: '$commit'"
-                exit 1
-              fi
-            done < commits.txt
-          else
-            echo "Error: No valid commits found for cherry-picking"
-            exit 1
-          fi
 
       - name: Build uat-candidate branch
         if: ${{ steps.collect.outputs.has_prs == 'true' }}
