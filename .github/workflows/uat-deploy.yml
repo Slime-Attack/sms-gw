@@ -1,9 +1,7 @@
-name: UAT Deploy (label-gated)
+name: CI/CD UAT Deploy
 
 on:
-  workflow_run:
-    workflows: ["Auto Tag from Merge"]
-    types: [completed]
+  workflow_dispatch:   # manual trigger for control (can also be scheduled)
 
 permissions:
   contents: write
@@ -14,182 +12,144 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build-and-push-uat:
-    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'uat' }}
+  prepare-candidate:
     runs-on: ubuntu-latest
     outputs:
       should_deploy: ${{ steps.collect.outputs.has_prs }}
       prs: ${{ steps.collect.outputs.prs }}
-      docker_tag: ${{ steps.settag.outputs.docker_tag }}
+      docker_tag: ${{ steps.version.outputs.docker_tag }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Ensure jq and gh are available
-        shell: bash
+      - name: Ensure jq + gh
         run: |
-          set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y jq gh
 
-      - name: Determine last UAT deploy tag (uat-vX.Y.Z)
-        id: lasttag
-        shell: bash
-        run: |
-          set -euo pipefail
-          git fetch --prune --tags origin
-          git fetch origin develop --prune
-          git fetch origin uat --prune
-
-          # Most recent semver-like UAT tag
-          LAST_UAT_TAG="$(git tag --sort=-creatordate | grep -E '^uat-v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)"
-          if [ -n "${LAST_UAT_TAG:-}" ]; then
-            echo "last_uat_tag=${LAST_UAT_TAG}" >> "$GITHUB_OUTPUT"
-            # Use the commit time of the tag's target as lower bound (UTC date)
-            LAST_TS_EPOCH="$(git log -1 --format=%ct "${LAST_UAT_TAG}")"
-            LAST_TS_DATE="$(date -u -d "@${LAST_TS_EPOCH}" +%Y-%m-%d)"
-            echo "last_uat_date=${LAST_TS_DATE}" >> "$GITHUB_OUTPUT"
-            echo "Found last UAT tag: ${LAST_UAT_TAG} (UTC date ${LAST_TS_DATE})"
-          else
-            echo "No previous uat-v* tag found; treating as first UAT deploy."
-            echo "last_uat_tag=" >> "$GITHUB_OUTPUT"
-            echo "last_uat_date=" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Collect labeled PRs merged since last UAT deploy
+      - name: Find PRs marked for UAT
         id: collect
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-        shell: bash
         run: |
-          set -euo pipefail
+          git fetch --tags origin
+          LAST_TAG=$(git tag --sort=-creatordate | grep '^uat-v' | head -n1 || true)
 
-          if [ -n "${{ steps.lasttag.outputs.last_uat_date }}" ]; then
-            GH_SEARCH="label:\"promote:uat\" base:develop merged:>=${{ steps.lasttag.outputs.last_uat_date }}"
+          if [ -n "$LAST_TAG" ]; then
+            DATE=$(git log -1 --format=%ct "$LAST_TAG")
+            SINCE=$(date -u -d "@$DATE" +%Y-%m-%d)
+            SEARCH="label:\"promote:uat\" base:develop merged:>=$SINCE"
           else
-            GH_SEARCH="label:\"promote:uat\" base:develop"
+            SEARCH="label:\"promote:uat\" base:develop"
           fi
 
-          echo "Search query: ${GH_SEARCH}"
-          gh pr list --repo "$REPO" --state merged \
-            --search "${GH_SEARCH}" --limit 200 \
-            --json number,mergedAt \
-          | jq -r 'map(select(.mergedAt != null)) | sort_by(.mergedAt) | .[].number' > /tmp/prs.txt
+          echo "Search query: $SEARCH"
+          gh pr list --repo "$REPO" --state merged --search "$SEARCH" \
+            --json number,mergeCommit \
+          | jq -r 'map(select(.mergeCommit != null)) | .[].number' > prs.txt
 
-          if [ -s /tmp/prs.txt ]; then
-            PRS_CSV="$(paste -sd, /tmp/prs.txt)"
-            echo "prs=${PRS_CSV}" >> "$GITHUB_OUTPUT"
+          gh pr list --repo "$REPO" --state merged --search "$SEARCH" \
+            --json number,mergeCommit \
+          | jq -r 'map(select(.mergeCommit != null)) | .[].mergeCommit' > commits.txt
+
+          if [ -s prs.txt ]; then
+            PRS=$(paste -sd, prs.txt)
+            echo "prs=$PRS" >> "$GITHUB_OUTPUT"
             echo "has_prs=true" >> "$GITHUB_OUTPUT"
-            echo "PRs to deploy since last UAT tag: ${PRS_CSV}"
           else
             echo "prs=" >> "$GITHUB_OUTPUT"
             echo "has_prs=false" >> "$GITHUB_OUTPUT"
-            echo "No new labeled PRs since last UAT tag."
           fi
 
-      - name: Checkout UAT head (build source)
+      - name: Build uat-candidate branch
         if: ${{ steps.collect.outputs.has_prs == 'true' }}
-        uses: actions/checkout@v4
+        run: |
+          git fetch origin uat
+          git checkout -B uat-candidate origin/uat
+
+          while read commit; do
+            git cherry-pick "$commit" || exit 1
+          done < commits.txt
+
+          git push origin uat-candidate --force
+
+      - name: Set Docker tag
+        id: version
+        if: ${{ steps.collect.outputs.has_prs == 'true' }}
+        run: |
+          # Latest uat-vX.Y.Z + bump patch
+          LATEST=$(git tag --sort=-creatordate | grep '^uat-v' | head -n1 || echo "uat-v0.0.0")
+          BASE="${LATEST#uat-v}"
+          IFS=. read -r MAJOR MINOR PATCH <<< "$BASE"
+          PATCH=$((PATCH+1))
+          NEW="uat-v$MAJOR.$MINOR.$PATCH"
+          echo "docker_tag=$NEW" >> "$GITHUB_OUTPUT"
+          echo "Using Docker tag: $NEW"
+
+  build-and-push:
+    needs: prepare-candidate
+    if: ${{ needs.prepare-candidate.outputs.should_deploy == 'true' }}
+    runs-on: ubuntu-latest
+    outputs:
+      docker_tag: ${{ needs.prepare-candidate.outputs.docker_tag }}
+      prs: ${{ needs.prepare-candidate.outputs.prs }}
+    steps:
+      - uses: actions/checkout@v4
         with:
-          ref: uat
+          ref: uat-candidate
           fetch-depth: 0
 
-      - name: Set Docker tag (must be uat-vX.Y.Z)
-        id: settag
-        if: ${{ steps.collect.outputs.has_prs == 'true' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          git fetch --tags --force
-          # Use latest semver tag for UAT version
-          TAG="$(git tag --sort=-creatordate | grep -E '^uat-v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)"
-          if [ -z "${TAG:-}" ]; then
-            echo "ERROR: No semver UAT tag (uat-vX.Y.Z) found. Please create one before deploying." >&2
-            exit 1
-          fi
-          echo "docker_tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "Using docker tag: ${TAG}"
-
       - name: Docker login
-        if: ${{ steps.collect.outputs.has_prs == 'true' }}
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build & push UAT image from uat HEAD
-        if: ${{ steps.collect.outputs.has_prs == 'true' }}
+      - name: Build & push Docker image
         uses: docker/build-push-action@v5
         with:
           context: .
           push: true
           tags: |
-            apexdev23/sms-gw:${{ steps.settag.outputs.docker_tag }}
+            apexdev23/sms-gw:${{ needs.prepare-candidate.outputs.docker_tag }}
             apexdev23/sms-gw:latest-uat
 
   deploy-uat:
-    needs: build-and-push-uat
-    if: ${{ needs.build-and-push-uat.outputs.should_deploy == 'true' }}
+    needs: build-and-push
     runs-on: [self-hosted, uat]
     steps:
       - uses: actions/checkout@v4
 
       - name: Docker login on server
-        shell: bash
         run: |
-          set -euo pipefail
           echo ${{ secrets.DOCKERHUB_TOKEN }} | docker login -u ${{ secrets.DOCKERHUB_USERNAME }} --password-stdin
 
-      - name: Show image tag and PRs
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "Deploying tag: ${{ needs.build-and-push-uat.outputs.docker_tag }}"
-          echo "PRs included: ${{ needs.build-and-push-uat.outputs.prs }}"
-
       - name: Deploy App
-        shell: bash
         run: |
-          set -euo pipefail
           cd ~/sms-gw
-          ./deploy.sh ${{ needs.build-and-push-uat.outputs.docker_tag }}
+          ./deploy.sh ${{ needs.build-and-push.outputs.docker_tag }}
 
-      - name: Update UAT tag (uat-{version})
+      - name: Merge candidate -> uat and tag
         if: ${{ success() }}
-        shell: bash
         run: |
-          set -euo pipefail
-          git fetch --prune --tags origin
+          git fetch origin
           git checkout uat
+          git merge --ff-only origin/uat-candidate
+          git push origin uat
 
-          VERSION_TAG="${{ needs.build-and-push-uat.outputs.docker_tag }}"
+          VERSION=${{ needs.build-and-push.outputs.docker_tag }}
+          git tag -f "$VERSION"
+          git push origin "$VERSION" --force
 
-          # Enforce expected format uat-vX.Y.Z
-          if [[ ! "$VERSION_TAG" =~ ^uat-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "ERROR: Expected semver-style tag (uat-vX.Y.Z), got: $VERSION_TAG" >&2
-            exit 1
-          fi
-
-          echo "Moving tag $VERSION_TAG -> current uat HEAD"
-          git tag -f "$VERSION_TAG"
-          git push origin "$VERSION_TAG" --force
-
-      # Optional: remove the label from PRs that just triggered this deploy
-      - name: Remove promote:uat label from deployed PRs
-        if: ${{ success() && needs.build-and-push-uat.outputs.prs != '' }}
+      - name: Remove promote:uat labels
+        if: ${{ success() && needs.build-and-push.outputs.prs != '' }}
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-        shell: bash
         run: |
-          set -euo pipefail
-          sudo apt-get update && sudo apt-get install -y gh
-          IFS=',' read -ra arr <<< "${{ needs.build-and-push-uat.outputs.prs }}"
+          IFS=',' read -ra arr <<< "${{ needs.build-and-push.outputs.prs }}"
           for num in "${arr[@]}"; do
-            [ -z "$num" ] && continue
-            echo "Removing label from PR #$num"
             gh pr edit "$num" --remove-label "promote:uat" --repo "$REPO" || true
           done
