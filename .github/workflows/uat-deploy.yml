@@ -116,6 +116,10 @@ jobs:
           set -euo pipefail
           git fetch origin uat
           git checkout -B uat-candidate origin/uat
+          
+          # Configure git user identity
+          git config user.name "GitHub Actions Bot"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
       
           while read commit; do
             [ -z "$commit" ] && continue
