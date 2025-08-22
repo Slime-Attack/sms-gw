@@ -14,50 +14,43 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build-uac-and-push-image:
+  identify-prs:
     if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'uat' }}
     runs-on: ubuntu-latest
     outputs:
       should_deploy: ${{ steps.decide.outputs.should_deploy }}
       prs_included: ${{ steps.filter.outputs.prs_included }}
       prs_excluded: ${{ steps.filter.outputs.prs_excluded }}
-      docker_tag: ${{ steps.settag.outputs.docker_tag }}
+      commit_shas: ${{ steps.get_commits.outputs.commit_shas }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Ensure jq and gh are available
+      - name: Install dependencies
         shell: bash
         run: |
-          set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y jq gh
 
-      - name: Determine last UAT version tag + timestamp
+      - name: Determine last UAT tag and timestamp
         id: lasttag
         shell: bash
         run: |
-          set -euo pipefail
           git fetch --prune --tags origin
-          git fetch origin develop --prune
-          git fetch origin uat --prune
-
           LAST_UAT_TAG="$(git tag --sort=-creatordate | grep -E '^uat-v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)"
           if [ -n "${LAST_UAT_TAG:-}" ]; then
             echo "last_uat_tag=${LAST_UAT_TAG}" >> "$GITHUB_OUTPUT"
             LAST_TS_EPOCH="$(git log -1 --format=%ct "${LAST_UAT_TAG}")"
             LAST_TS_ISO="$(date -u -d "@${LAST_TS_EPOCH}" +%Y-%m-%dT%H:%M:%SZ)"
             echo "last_uat_iso=${LAST_TS_ISO}" >> "$GITHUB_OUTPUT"
-            echo "Found last UAT tag: ${LAST_UAT_TAG} (UTC ${LAST_TS_ISO})"
           else
-            echo "No previous uat-v* tag found; treating as first UAT deploy."
             echo "last_uat_tag=" >> "$GITHUB_OUTPUT"
             echo "last_uat_iso=" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Collect merged PRs to develop since last UAT tag
+      - name: Collect merged PRs since last UAT tag
         id: collect
         env:
           GH_TOKEN: ${{ github.token }}
@@ -65,25 +58,18 @@ jobs:
           LAST_ISO: ${{ steps.lasttag.outputs.last_uat_iso }}
         shell: bash
         run: |
-          set -euo pipefail
-
           gh pr list --repo "$REPO" --state merged \
             --search 'base:develop' --limit 200 \
-            --json number,mergedAt,labels,mergeCommit,title \
+            --json number,mergedAt,labels,mergeCommit \
           | jq -r --arg last "${LAST_ISO:-}" '
               map(select(.mergedAt != null))
               | ( if $last == "" then . else map(select(.mergedAt > $last)) end )
               ' > /tmp/merged_since.json
 
-          COUNT="$(jq 'length' /tmp/merged_since.json)"
-          echo "Found ${COUNT} merged PR(s) to develop since last UAT tag."
-
-      - name: Split PRs into included and excluded
+      - name: Filter PRs by promote:uat label
         id: filter
         shell: bash
         run: |
-          set -euo pipefail
-
           jq -r '
             [ .[] | select([.labels[].name] // [] | index("promote:uat")) | .number ] as $inc
             | [ .[] | select( ( [.labels[].name] // [] | index("promote:uat") ) | not ) | .number ] as $exc
@@ -96,102 +82,59 @@ jobs:
           echo "prs_included=${PRS_INCLUDED}" >> "$GITHUB_OUTPUT"
           echo "prs_excluded=${PRS_EXCLUDED}" >> "$GITHUB_OUTPUT"
 
-          echo "Included PRs: ${PRS_INCLUDED}"
-          echo "Excluded PRs: ${PRS_EXCLUDED}"
+      - name: Get commit SHAs for included PRs
+        id: get_commits
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          IFS=',' read -ra INCLUDED_PRS <<< "${{ steps.filter.outputs.prs_included }}"
+          commit_shas=()
+
+          for pr_number in "${INCLUDED_PRS[@]}"; do
+            [ -z "$pr_number" ] && continue
+            merge_sha=$(gh pr view "$pr_number" --repo "$REPO" --json mergeCommit -q .mergeCommit.oid)
+            if [ -n "$merge_sha" ]; then
+              commit_shas+=("$merge_sha")
+            fi
+          done
+
+          echo "commit_shas=${commit_shas[*]}" >> "$GITHUB_OUTPUT"
 
       - name: Decide if we should deploy
         id: decide
         shell: bash
         run: |
-          set -euo pipefail
           if [ -n "${{ steps.filter.outputs.prs_included }}" ]; then
             echo "should_deploy=true" >> "$GITHUB_OUTPUT"
-            echo "Will proceed with UAT candidate and deploy."
           else
             echo "should_deploy=false" >> "$GITHUB_OUTPUT"
-            echo "No labeled PRs since last UAT tag; skipping build & deploy."
           fi
 
-      - name: Create rebase-based uat-candidate branch
-        if: ${{ steps.decide.outputs.should_deploy == 'true' }}
-        id: candidate
-        env:
-          REPO: ${{ github.repository }}
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          # Get the commit hash of the last UAT tag (our starting point)
-          if [ -n "${{ steps.lasttag.outputs.last_uat_tag }}" ]; then
-            BASE_COMMIT="${{ steps.lasttag.outputs.last_uat_tag }}"
-          else
-            # If no previous UAT tag, use the first commit of develop
-            BASE_COMMIT="$(git rev-list --max-parents=0 develop | head -1)"
-          fi
-
-          echo "Using base commit: $BASE_COMMIT"
-
-          # Create a new branch from the base commit
-          git checkout -B uat-candidate "$BASE_COMMIT"
-
-          # Get merge commit SHAs for included PRs
-          IFS=',' read -ra INCLUDED_PR_NUMBERS <<< "${{ steps.filter.outputs.prs_included }}"
-          INCLUDED_COMMITS=()
-
-          for pr_number in "${INCLUDED_PR_NUMBERS[@]}"; do
-            [ -z "$pr_number" ] && continue
-            echo "Processing included PR #$pr_number"
-            
-            # Get merge commit SHA
-            merge_sha="$(gh pr view "$pr_number" --repo "$REPO" --json mergeCommit -q .mergeCommit.oid 2>/dev/null || true)"
-            
-            if [ -n "$merge_sha" ]; then
-              echo "Found merge commit $merge_sha for PR #$pr_number"
-              INCLUDED_COMMITS+=("$merge_sha")
-            else
-              echo "Warning: Could not find merge commit for PR #$pr_number"
-            fi
-          done
-
-          if [ ${#INCLUDED_COMMITS[@]} -eq 0 ]; then
-            echo "Error: No valid commits found for included PRs"
-            exit 1
-          fi
-
-          # Cherry-pick each included commit onto our base
-          for commit in "${INCLUDED_COMMITS[@]}"; do
-            echo "Cherry-picking commit $commit"
-            if git cherry-pick --allow-empty --keep-redundant-commits "$commit"; then
-              echo "Successfully cherry-picked $commit"
-            else
-              echo "Cherry-pick failed for $commit, aborting"
-              git cherry-pick --abort
-              exit 1
-            fi
-          done
-
-          # Push the candidate branch
-          git push -f origin uat-candidate
-          echo "Created uat-candidate branch with selective commits"
+  build-image:
+    needs: identify-prs
+    if: ${{ needs.identify-prs.outputs.should_deploy == 'true' }}
+    runs-on: ubuntu-latest
+    outputs:
+      docker_tag: ${{ steps.settag.outputs.docker_tag }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
       - name: Set Docker tag
-        if: ${{ steps.decide.outputs.should_deploy == 'true' }}
         id: settag
         shell: bash
         run: |
-          set -euo pipefail
           git fetch --tags --force
           TAG="$(git tag --sort=-creatordate | grep -E '^uat-v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)"
           if [ -z "${TAG:-}" ]; then
-            echo "ERROR: No semver UAT tag found. Please create one before deploying." >&2
+            echo "ERROR: No UAT tag found" >&2
             exit 1
           fi
           echo "docker_tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "Using docker tag: ${TAG}"
 
-      - name: Build & push UAT image from uat-candidate
-        if: ${{ steps.decide.outputs.should_deploy == 'true' }}
+      - name: Build & push UAT image
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -200,87 +143,97 @@ jobs:
             apexdev23/sms-gw:${{ steps.settag.outputs.docker_tag }}
             apexdev23/sms-gw:latest-uat
 
-  merge-and-deploy-uat:
-    needs: build-uac-and-push-image
-    if: ${{ needs.build-uac-and-push-image.outputs.should_deploy == 'true' }}
+  deploy-to-uat:
+    needs: [identify-prs, build-image]
+    if: ${{ needs.identify-prs.outputs.should_deploy == 'true' }}
     runs-on: [self-hosted, uat]
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Docker login on server
+      - name: Install GitHub CLI
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gh
+
+      - name: Create temporary branch with only included PRs
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          echo ${{ secrets.DOCKERHUB_TOKEN }} | docker login -u ${{ secrets.DOCKERHUB_USERNAME }} --password-stdin
 
-      - name: Fast-forward merge uat-candidate -> uat (or create merge commit)
-        shell: bash
-        run: |
-          set -euo pipefail
-          git fetch origin uat-candidate uat --prune
+          # Fetch everything
+          git fetch --all --prune --tags
 
-          # Try fast-forward; if not possible, make a merge commit
+          # Create a new branch from current uat
           git checkout uat
-          git reset --hard origin/uat
+          git pull --ff-only
+          git checkout -b uat-temp
 
-          if git merge --ff-only origin/uat-candidate; then
-            echo "Fast-forwarded uat to uat-candidate."
-          else
-            echo "No FF possible; creating a merge commit."
-            git merge --no-ff origin/uat-candidate -m "UAT deploy: merge uat-candidate"
-          fi
+          # Get the commit SHAs from the first job
+          IFS=' ' read -ra COMMIT_SHAS <<< "${{ needs.identify-prs.outputs.commit_shas }}"
 
+          # Cherry-pick each commit (this is simpler than merge commits)
+          for commit_sha in "${COMMIT_SHAS[@]}"; do
+            [ -z "$commit_sha" ] && continue
+            
+            echo "Applying changes from commit $commit_sha"
+            
+            # Get the diff and apply it
+            if git cherry-pick "$commit_sha" --allow-empty; then
+              echo "Successfully applied commit $commit_sha"
+            else
+              echo "Failed to apply commit $commit_sha, aborting"
+              git cherry-pick --abort
+              # Try alternative approach: apply as patch
+              git diff "$commit_sha^1" "$commit_sha" | git apply --3way || true
+            fi
+          done
+
+          # Push the temporary branch
+          git push -f origin uat-temp
+
+      - name: Fast-forward uat to temporary branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git checkout uat
+          git reset --hard origin/uat-temp
           git push origin uat
 
-      - name: Show image tag and PRs
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "Deploying tag: ${{ needs.build-uac-and-push-image.outputs.docker_tag }}"
-          echo "PRs included: ${{ needs.build-uac-and-push-image.outputs.prs_included }}"
-          echo "PRs excluded: ${{ needs.build-uac-and-push-image.outputs.prs_excluded }}"
+          # Clean up temporary branch
+          git push origin --delete uat-temp || true
 
-      - name: Deploy App
+      - name: Deploy application
         shell: bash
         run: |
-          set -euo pipefail
           cd ~/sms-gw
-          ./deploy.sh ${{ needs.build-uac-and-push-image.outputs.docker_tag }}
+          ./deploy.sh ${{ needs.build-image.outputs.docker_tag }}
 
-      - name: Move UAT tag (uat-{version}) to new uat HEAD
-        if: ${{ success() }}
+      - name: Update UAT tag
         shell: bash
         run: |
-          set -euo pipefail
-          git fetch --prune --tags origin
+          git fetch --tags --force
           git checkout uat
           git pull --ff-only
 
-          VERSION_TAG="${{ needs.build-uac-and-push-image.outputs.docker_tag }}"
-          if [[ ! "$VERSION_TAG" =~ ^uat-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "ERROR: Expected semver-style tag (uat-vX.Y.Z), got: $VERSION_TAG" >&2
-            exit 1
-          fi
+          TAG="${{ needs.build-image.outputs.docker_tag }}"
+          git tag -f "$TAG"
+          git push origin "$TAG" --force
 
-          echo "Moving tag $VERSION_TAG -> current uat HEAD"
-          git tag -f "$VERSION_TAG"
-          git push origin "$VERSION_TAG" --force
-
-      # Optional: remove label from included PRs (so they won't re-trigger next time)
-      - name: Remove promote:uat label from included PRs
-        if: ${{ success() && needs.build-uac-and-push-image.outputs.prs_included != '' }}
+      - name: Remove promote:uat labels
+        if: ${{ success() && needs.identify-prs.outputs.prs_included != '' }}
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
         shell: bash
         run: |
-          set -euo pipefail
-          sudo apt-get update && sudo apt-get install -y gh
-          IFS=',' read -ra arr <<< "${{ needs.build-uac-and-push-image.outputs.prs_included }}"
-          for num in "${arr[@]}"; do
-            [ -z "$num" ] && continue
-            echo "Removing label from PR #$num"
-            gh pr edit "$num" --remove-label "promote:uat" --repo "$REPO" || true
+          IFS=',' read -ra PR_NUMBERS <<< "${{ needs.identify-prs.outputs.prs_included }}"
+          for pr_number in "${PR_NUMBERS[@]}"; do
+            [ -z "$pr_number" ] && continue
+            gh pr edit "$pr_number" --remove-label "promote:uat" --repo "$REPO" || true
           done
