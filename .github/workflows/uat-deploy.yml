@@ -34,6 +34,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
         run: |
+          set -euo pipefail
+
           git fetch --tags origin
           LAST_TAG=$(git tag --sort=-creatordate | grep '^uat-v' | head -n1 || true)
 
@@ -49,8 +51,7 @@ jobs:
 
           # Collect PR numbers
           gh pr list --repo "$REPO" --state merged --search "$SEARCH" \
-            --json number \
-            | jq -r '.[].number' > prs.txt
+            --json number | jq -r '.[].number' > prs.txt
 
           if [ ! -s prs.txt ]; then
             echo "prs=" >> "$GITHUB_OUTPUT"
@@ -64,13 +65,18 @@ jobs:
           echo "has_prs=true" >> "$GITHUB_OUTPUT"
           echo "PRs to promote: $PRS"
 
-          # Collect commit SHAs cleanly
+          # Collect commit SHAs safely
           > commits.txt
           while read pr; do
-            COMMIT=$(gh pr view "$pr" --repo "$REPO" --json mergeCommit,headRefOid \
-              | jq -r '.mergeCommit // .headRefOid')
-            if [ -n "$COMMIT" ] && [ "$COMMIT" != "null" ]; then
-              echo "$COMMIT" >> commits.txt
+            MERGE_SHA=$(gh pr view "$pr" --repo "$REPO" --json mergeCommit | jq -r '.mergeCommit // empty')
+            if [ -n "$MERGE_SHA" ]; then
+              echo "$MERGE_SHA" >> commits.txt
+              continue
+            fi
+
+            HEAD_SHA=$(gh pr view "$pr" --repo "$REPO" --json headRefOid | jq -r '.headRefOid // empty')
+            if [ -n "$HEAD_SHA" ]; then
+              echo "$HEAD_SHA" >> commits.txt
             fi
           done < prs.txt
 
