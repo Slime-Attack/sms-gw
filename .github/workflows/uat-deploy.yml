@@ -1,8 +1,8 @@
 name: CI/CD UAT Deploy
 
 on:
-  workflow_dispatch:   # manual trigger for control (can also be scheduled)
-
+  workflow_dispatch:
+  
 permissions:
   contents: write
   pull-requests: read
@@ -46,30 +46,38 @@ jobs:
           fi
 
           echo "Search query: $SEARCH"
-          gh pr list --repo "$REPO" --state merged --search "$SEARCH" \
-            --json number,mergeCommit \
-          | jq -r 'map(select(.mergeCommit != null)) | .[].number' > prs.txt
 
+          # Collect PR numbers
           gh pr list --repo "$REPO" --state merged --search "$SEARCH" \
-            --json number,mergeCommit \
-          | jq -r 'map(select(.mergeCommit != null)) | .[].mergeCommit' > commits.txt
+            --json number \
+            | jq -r '.[].number' > prs.txt
+
+          # Collect commit SHAs: prefer mergeCommit, else headRefOid (squash/rebase)
+          gh pr list --repo "$REPO" --state merged --search "$SEARCH" \
+            --json number,mergeCommit,headRefOid \
+            | jq -r '.[] | .mergeCommit // .headRefOid' > commits.txt
 
           if [ -s prs.txt ]; then
             PRS=$(paste -sd, prs.txt)
             echo "prs=$PRS" >> "$GITHUB_OUTPUT"
             echo "has_prs=true" >> "$GITHUB_OUTPUT"
+            echo "PRs to promote: $PRS"
           else
             echo "prs=" >> "$GITHUB_OUTPUT"
             echo "has_prs=false" >> "$GITHUB_OUTPUT"
+            echo "No PRs found for UAT promotion."
           fi
 
       - name: Build uat-candidate branch
         if: ${{ steps.collect.outputs.has_prs == 'true' }}
         run: |
+          set -euo pipefail
           git fetch origin uat
           git checkout -B uat-candidate origin/uat
 
           while read commit; do
+            [ -z "$commit" ] && continue
+            echo "Cherry-picking $commit"
             git cherry-pick "$commit" || exit 1
           done < commits.txt
 
@@ -79,7 +87,6 @@ jobs:
         id: version
         if: ${{ steps.collect.outputs.has_prs == 'true' }}
         run: |
-          # Latest uat-vX.Y.Z + bump patch
           LATEST=$(git tag --sort=-creatordate | grep '^uat-v' | head -n1 || echo "uat-v0.0.0")
           BASE="${LATEST#uat-v}"
           IFS=. read -r MAJOR MINOR PATCH <<< "$BASE"
@@ -151,5 +158,6 @@ jobs:
         run: |
           IFS=',' read -ra arr <<< "${{ needs.build-and-push.outputs.prs }}"
           for num in "${arr[@]}"; do
+            echo "Removing label from PR #$num"
             gh pr edit "$num" --remove-label "promote:uat" --repo "$REPO" || true
           done
