@@ -65,23 +65,50 @@ jobs:
           echo "has_prs=true" >> "$GITHUB_OUTPUT"
           echo "PRs to promote: $PRS"
 
-          # Collect commit SHAs safely
+          # Improved commit SHA collection
           > commits.txt
           while read pr; do
-            MERGE_SHA=$(gh pr view "$pr" --repo "$REPO" --json mergeCommit | jq -r '.mergeCommit // empty')
-            if [ -n "$MERGE_SHA" ]; then
+            [ -z "$pr" ] && continue
+            
+            echo "Processing PR #$pr"
+            
+            # Try to get merge commit first
+            MERGE_SHA=$(gh pr view "$pr" --repo "$REPO" --json mergeCommit -q '.mergeCommit.oid' 2>/dev/null || true)
+            
+            if [ -n "$MERGE_SHA" ] && [ "$MERGE_SHA" != "null" ]; then
+              echo "Using merge commit: $MERGE_SHA"
               echo "$MERGE_SHA" >> commits.txt
               continue
             fi
 
-            HEAD_SHA=$(gh pr view "$pr" --repo "$REPO" --json headRefOid | jq -r '.headRefOid // empty')
-            if [ -n "$HEAD_SHA" ]; then
+            # Fallback to head commit
+            HEAD_SHA=$(gh pr view "$pr" --repo "$REPO" --json commits -q '.commits[-1].oid' 2>/dev/null || true)
+            
+            if [ -n "$HEAD_SHA" ] && [ "$HEAD_SHA" != "null" ]; then
+              echo "Using head commit: $HEAD_SHA"
               echo "$HEAD_SHA" >> commits.txt
+            else
+              echo "Warning: Could not find commit for PR #$pr"
             fi
           done < prs.txt
 
           echo "Collected commits:"
           cat commits.txt
+
+          # Verify we have valid commit SHAs
+          if [ -s commits.txt ]; then
+            while read commit; do
+              if [ -n "$commit" ] && git rev-parse --verify "$commit" >/dev/null 2>&1; then
+                echo "Valid commit: $commit"
+              else
+                echo "Error: Invalid commit SHA found: '$commit'"
+                exit 1
+              fi
+            done < commits.txt
+          else
+            echo "Error: No valid commits found for cherry-picking"
+            exit 1
+          fi
 
       - name: Build uat-candidate branch
         if: ${{ steps.collect.outputs.has_prs == 'true' }}
