@@ -99,6 +99,9 @@ jobs:
 
       - name: Build uat-candidate branch using merge
         if: ${{ steps.collect.outputs.has_prs == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           git fetch origin develop uat
@@ -107,32 +110,35 @@ jobs:
           # Configure git user identity
           git config user.name "GitHub Actions Bot"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          # Create a temporary branch with all the PR commits to merge
-          git checkout -b temp-merge-base origin/develop
+      
+          # Create a merge commit using GitHub API for proper merge tracking
+          PR_LIST=$(cat pr_numbers.txt)
+          MERGE_MESSAGE="Merge UAT PRs: $PR_LIST"
           
-          # Reset to the point before any of our PRs
-          FIRST_COMMIT=$(head -1 commits.txt)
-          BASE_COMMIT=$(git log --oneline --grep="Merge pull request" --grep="Merge PR" -100 | grep -v "$(cat commits.txt | tr '\n' '|')" | head -1 | cut -d' ' -f1)
-          if [ -z "$BASE_COMMIT" ]; then
-            BASE_COMMIT=$(git merge-base origin/develop origin/uat)
+          # Get the current HEAD of uat-candidate
+          UAT_HEAD=$(git rev-parse HEAD)
+          
+          # Get the HEAD of develop
+          git fetch origin develop
+          DEVELOP_HEAD=$(git rev-parse origin/develop)
+          
+          # Create a merge commit manually
+          git checkout -b temp-merge $UAT_HEAD
+          git merge $DEVELOP_HEAD -m "$MERGE_MESSAGE" --no-ff --no-commit 2>/dev/null || true
+          
+          # If there are changes, commit them
+          if ! git diff --cached --quiet || ! git diff --quiet; then
+            git commit -m "$MERGE_MESSAGE"
+          else
+            echo "No changes to merge"
           fi
           
-          git reset --hard $BASE_COMMIT
-          
-          # Cherry-pick all PR commits to create a clean mergeable history
-          while read commit; do
-            [ -z "$commit" ] && continue
-            echo "Applying commit $commit"
-            git cherry-pick $commit || { git cherry-pick --abort; exit 1; }
-          done < commits.txt
-          
-          # Now switch back to uat-candidate and merge properly
+          # Go back to uat-candidate and fast-forward
           git checkout uat-candidate
-          git merge temp-merge-base -m "Merge UAT PRs: $PRS" --no-ff
+          git merge temp-merge --ff-only
           
           # Clean up
-          git branch -D temp-merge-base
+          git branch -D temp-merge
           git push origin uat-candidate --force
 
       - name: Set Docker tag
