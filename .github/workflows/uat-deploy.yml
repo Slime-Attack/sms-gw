@@ -97,43 +97,42 @@ jobs:
           name: pr-numbers
           path: pr_numbers.txt
           
-      - name: Build uat-candidate branch using GitHub API
+      - name: Build uat-candidate branch
         if: ${{ steps.collect.outputs.has_prs == 'true' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          
-          # Create a new branch from uat
           git fetch origin uat
           git checkout -B uat-candidate origin/uat
           
-          # For each PR, create a merge commit using GitHub API
+          # Configure git user identity
+          git config user.name "GitHub Actions Bot"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Clean up temporary files from previous steps
+          rm -f all_uat_prs.txt commits.txt prs_to_deploy.txt 2>/dev/null || true
+
           while read commit; do
             [ -z "$commit" ] && continue
             
-            # Find the PR number from the commit
-            PR_NUMBER=$(gh api -X GET "repos/$REPO/commits/$commit/pulls" -q '.[0].number' || echo "")
+            echo "Attempting to cherry-pick $commit"
             
-            if [ -n "$PR_NUMBER" ]; then
-              echo "Merging PR #$PR_NUMBER ($commit)"
-              
-              # Use GitHub API to create a proper merge
-              gh pr merge $PR_NUMBER --merge --subject "Merge PR #$PR_NUMBER to UAT" --body "Automated UAT deployment"
-              
-              # Pull the changes
-              git pull origin uat-candidate
+            # Skip if already in history
+            if git merge-base --is-ancestor "$commit" HEAD 2>/dev/null; then
+              echo "Commit $commit is already in history, skipping"
+              continue
+            fi
+            
+            # Check if this is a merge commit (has two parents)
+            if git show --no-patch --format="%P" "$commit" | grep -q " "; then
+              echo "This is a merge commit, using mainline parent (-m 1)"
+              git cherry-pick -x -m 1 "$commit" || \
+                { echo "Cherry-pick failed, may be empty - skipping..."; git cherry-pick --skip; }
             else
-              echo "Could not find PR for commit $commit, applying directly"
-              if git show --no-patch --format="%P" "$commit" | grep -q " "; then
-                git cherry-pick -x -m 1 "$commit" || git cherry-pick --skip
-              else
-                git cherry-pick -x "$commit" || git cherry-pick --skip
-              fi
+              git cherry-pick -x "$commit" || \
+                { echo "Cherry-pick failed, may be empty - skipping..."; git cherry-pick --skip; }
             fi
           done < commits.txt
-          
+      
           git push origin uat-candidate --force
 
       - name: Set Docker tag
@@ -153,7 +152,7 @@ jobs:
     if: ${{ needs.prepare-candidate.outputs.should_deploy == 'true' }}
     runs-on: ubuntu-latest
     outputs:
-      docker_tag: ${{ needs.prepare-candidate.outputs.docker_tag }}  # Add this output
+      docker_tag: ${{ needs.prepare-candidate.outputs.docker_tag }}
       prs: ${{ needs.prepare-candidate.outputs.prs }}
     steps:
       - uses: actions/checkout@v4
@@ -166,6 +165,13 @@ jobs:
         with:
           name: pr-numbers
           path: .
+
+      - name: Read PR numbers for output
+        id: pr-output
+        run: |
+          PRS=$(cat pr_numbers.txt | tr -d '\n')
+          echo "prs=$PRS" >> $GITHUB_OUTPUT
+          echo "PR numbers: $PRS"
 
       - name: Docker login
         uses: docker/login-action@v3
@@ -233,8 +239,13 @@ jobs:
             IFS=',' read -ra arr <<< "$PRS"
             for num in "${arr[@]}"; do
               echo "Removing promote:uat label from PR #$num"
-              gh pr edit "$num" --remove-label "promote:uat" --repo "$REPO" || \
-                echo "Failed to remove label from PR #$num (might already be removed)"
+              # Check if the label still exists before trying to remove it
+              if gh pr view "$num" --repo "$REPO" --json labels | jq -e '.labels[].name | contains("promote:uat")' >/dev/null; then
+                gh pr edit "$num" --remove-label "promote:uat" --repo "$REPO" || \
+                  echo "Failed to remove label from PR #$num"
+              else
+                echo "Label already removed from PR #$num"
+              fi
             done
           else
             echo "No PR numbers found to remove labels from"
