@@ -199,8 +199,8 @@ jobs:
             apexdev23/sms-gw:${{ needs.prepare-candidate.outputs.docker_tag }}
             apexdev23/sms-gw:latest-uat
 
-      - name: Remove promote:uat labels (after successful build)
-        if: ${{ success() }}  # Only remove labels if build succeeded
+      - name: Remove promote:uat labels
+        if: ${{ success() }}
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -210,18 +210,22 @@ jobs:
             if [ -n "$PRS" ]; then
               IFS=',' read -ra arr <<< "$PRS"
               for num in "${arr[@]}"; do
-                echo "Attempting to remove promote:uat label from PR #$num"
+                echo "Attempting alternative method for PR #$num"
                 
-                # Remove the label using gh CLI (which works on Ubuntu runner)
-                gh pr edit "$num" --remove-label "promote:uat" --repo "$REPO" && \
-                  echo "✅ Successfully removed label from PR #$num" || \
-                  echo "⚠️  Failed to remove label from PR #$num (may already be removed)"
+                # Method 1: Try different gh command syntax
+                gh issue edit "$num" --remove-label "promote:uat" --repo "$REPO" || \
+                  
+                # Method 2: Try using API directly with gh
+                echo "Trying API approach..." && \
+                gh api --method DELETE -H "Accept: application/vnd.github.v3+json" \
+                  "/repos/$REPO/issues/$num/labels/promote:uat" || \
+                  
+                # Method 3: Final fallback - manual notification
+                echo "⚠️  Could not automatically remove label from PR #$num"
+                echo "Please manually remove the 'promote:uat' label from:"
+                echo "https://github.com/$REPO/pull/$num"
               done
-            else
-              echo "No PR numbers found in pr_numbers.txt"
             fi
-          else
-            echo "pr_numbers.txt file not found"
           fi
 
   deploy-uat:
