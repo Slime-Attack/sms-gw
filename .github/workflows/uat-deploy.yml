@@ -238,25 +238,33 @@ jobs:
           git tag -f "$VERSION"
           git push origin "$VERSION" --force
 
-      - name: Remove promote:uat labels
+      - name: Remove promote:uat labels (after successful build)
         if: ${{ success() }}
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
         run: |
-          PRS=$(cat pr_numbers.txt)
-          if [ -n "$PRS" ]; then
-            IFS=',' read -ra arr <<< "$PRS"
-            for num in "${arr[@]}"; do
-              echo "Removing promote:uat label from PR #$num"
-              # Check if the label still exists before trying to remove it
-              if gh pr view "$num" --repo "$REPO" --json labels | jq -e '.labels[].name | contains("promote:uat")' >/dev/null; then
-                gh pr edit "$num" --remove-label "promote:uat" --repo "$REPO" || \
-                  echo "Failed to remove label from PR #$num"
-              else
-                echo "Label already removed from PR #$num"
-              fi
-            done
+          if [ -f pr_numbers.txt ]; then
+            PRS=$(cat pr_numbers.txt)
+            if [ -n "$PRS" ]; then
+              IFS=',' read -ra arr <<< "$PRS"
+              for num in "${arr[@]}"; do
+                echo "Removing promote:uat label from PR #$num"
+                
+                # Check if the PR still has the promote:uat label
+                HAS_LABEL=$(gh pr view "$num" --repo "$REPO" --json labels | jq -r '.labels[].name' | grep -c "promote:uat" || true)
+                
+                if [ "$HAS_LABEL" -gt 0 ]; then
+                  echo "Removing promote:uat label from PR #$num"
+                  gh pr edit "$num" --remove-label "promote:uat" --repo "$REPO" || \
+                    echo "Warning: Failed to remove label from PR #$num"
+                else
+                  echo "PR #$num no longer has promote:uat label"
+                fi
+              done
+            else
+              echo "No PR numbers found in pr_numbers.txt"
+            fi
           else
-            echo "No PR numbers found to remove labels from"
+            echo "pr_numbers.txt file not found"
           fi
