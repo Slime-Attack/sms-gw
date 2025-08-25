@@ -203,7 +203,7 @@ jobs:
       - name: Deploy App
         run: |
           cd ~/sms-gw
-          ./deploy.sh ${{ needs.prepare-candidate.outputs.docker_tag }}
+          ./deploy.sh ${{ needs.build-and-push.outputs.docker_tag }}
 
       - name: Configure Git identity
         run: |
@@ -218,7 +218,7 @@ jobs:
           git merge origin/uat-candidate --ff-only
           git push origin uat
 
-          VERSION=${{ needs.prepare-candidate.outputs.docker_tag }}
+          VERSION=${{ needs.build-and-push.outputs.docker_tag }}
           git tag -f "$VERSION"
           git push origin "$VERSION" --force
 
