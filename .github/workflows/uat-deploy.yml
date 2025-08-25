@@ -84,33 +84,55 @@ jobs:
           echo "has_prs=true" >> "$GITHUB_OUTPUT"
           echo "PRs to promote: $PRS"
       
+          # Save PR numbers to a file for later use
+          echo "$PRS" > pr_numbers.txt
+      
           echo "Collected commits:"
           cat commits.txt
 
-      - name: Build uat-candidate branch
+      - name: Upload PR numbers artifact
+        if: ${{ steps.collect.outputs.has_prs == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-numbers
+          path: pr_numbers.txt
+
+      - name: Build uat-candidate branch using merge
         if: ${{ steps.collect.outputs.has_prs == 'true' }}
         run: |
           set -euo pipefail
-          git fetch origin uat
+          git fetch origin develop uat
           git checkout -B uat-candidate origin/uat
           
           # Configure git user identity
           git config user.name "GitHub Actions Bot"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-      
+
+          # Create a temporary branch with all the PR commits to merge
+          git checkout -b temp-merge-base origin/develop
+          
+          # Reset to the point before any of our PRs
+          FIRST_COMMIT=$(head -1 commits.txt)
+          BASE_COMMIT=$(git log --oneline --grep="Merge pull request" --grep="Merge PR" -100 | grep -v "$(cat commits.txt | tr '\n' '|')" | head -1 | cut -d' ' -f1)
+          if [ -z "$BASE_COMMIT" ]; then
+            BASE_COMMIT=$(git merge-base origin/develop origin/uat)
+          fi
+          
+          git reset --hard $BASE_COMMIT
+          
+          # Cherry-pick all PR commits to create a clean mergeable history
           while read commit; do
             [ -z "$commit" ] && continue
-            echo "Cherry-picking $commit"
-            
-            # Check if this is a merge commit (has two parents)
-            if git show --no-patch --format="%P" "$commit" | grep -q " "; then
-              echo "This is a merge commit, using mainline parent (-m 1)"
-              git cherry-pick -x -m 1 "$commit" || exit 1
-            else
-              git cherry-pick -x "$commit" || exit 1
-            fi
+            echo "Applying commit $commit"
+            git cherry-pick $commit || { git cherry-pick --abort; exit 1; }
           done < commits.txt
-      
+          
+          # Now switch back to uat-candidate and merge properly
+          git checkout uat-candidate
+          git merge temp-merge-base -m "Merge UAT PRs: $PRS" --no-ff
+          
+          # Clean up
+          git branch -D temp-merge-base
           git push origin uat-candidate --force
 
       - name: Set Docker tag
@@ -129,14 +151,17 @@ jobs:
     needs: prepare-candidate
     if: ${{ needs.prepare-candidate.outputs.should_deploy == 'true' }}
     runs-on: ubuntu-latest
-    outputs:
-      docker_tag: ${{ needs.prepare-candidate.outputs.docker_tag }}
-      prs: ${{ needs.prepare-candidate.outputs.prs }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: uat-candidate
           fetch-depth: 0
+
+      - name: Download PR numbers artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: pr-numbers
+          path: .
 
       - name: Docker login
         uses: docker/login-action@v3
@@ -159,7 +184,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # Important: need full history for merge operations
+          fetch-depth: 0
+
+      - name: Download PR numbers artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: pr-numbers
+          path: .
 
       - name: Docker login on server
         run: |
@@ -168,25 +199,22 @@ jobs:
       - name: Deploy App
         run: |
           cd ~/sms-gw
-          ./deploy.sh ${{ needs.build-and-push.outputs.docker_tag }}
+          ./deploy.sh ${{ needs.prepare-candidate.outputs.docker_tag }}
 
       - name: Configure Git identity
         run: |
           git config user.name "GitHub Actions Bot"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Merge candidate -> uat and tag
+      - name: Fast-forward uat to candidate
         if: ${{ success() }}
         run: |
           git fetch origin uat uat-candidate
           git checkout uat
-          
-          # Use strategy option to prefer UAT candidate changes (avoid false conflicts)
-          git merge origin/uat-candidate -Xtheirs --no-edit
-          
+          git merge origin/uat-candidate --ff-only
           git push origin uat
 
-          VERSION=${{ needs.build-and-push.outputs.docker_tag }}
+          VERSION=${{ needs.prepare-candidate.outputs.docker_tag }}
           git tag -f "$VERSION"
           git push origin "$VERSION" --force
 
