@@ -2,7 +2,7 @@ name: CI/CD UAT Deploy
 
 on:
   workflow_dispatch:
-  
+
 permissions:
   contents: write
   pull-requests: read
@@ -98,9 +98,18 @@ jobs:
           git config user.name "GitHub Actions Bot"
           git config user.email "github-actions[bot]@users.noreply.github.com"
       
-          # Merge all relevant PRs at once
-          PR_COMMITS=$(cat commits.txt | tr '\n' ' ')
-          git merge $PR_COMMITS -m "Merge PRs for UAT: $PRS"
+          while read commit; do
+            [ -z "$commit" ] && continue
+            echo "Cherry-picking $commit"
+            
+            # Check if this is a merge commit (has two parents)
+            if git show --no-patch --format="%P" "$commit" | grep -q " "; then
+              echo "This is a merge commit, using mainline parent (-m 1)"
+              git cherry-pick -x -m 1 "$commit" || exit 1
+            else
+              git cherry-pick -x "$commit" || exit 1
+            fi
+          done < commits.txt
       
           git push origin uat-candidate --force
 
@@ -149,6 +158,8 @@ jobs:
     runs-on: [self-hosted, uat]
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Important: need full history for merge operations
 
       - name: Docker login on server
         run: |
@@ -159,12 +170,20 @@ jobs:
           cd ~/sms-gw
           ./deploy.sh ${{ needs.build-and-push.outputs.docker_tag }}
 
+      - name: Configure Git identity
+        run: |
+          git config user.name "GitHub Actions Bot"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
       - name: Merge candidate -> uat and tag
         if: ${{ success() }}
         run: |
-          git fetch origin
+          git fetch origin uat uat-candidate
           git checkout uat
-          git merge --ff-only origin/uat-candidate
+          
+          # Use strategy option to prefer UAT candidate changes (avoid false conflicts)
+          git merge origin/uat-candidate -Xtheirs --no-edit
+          
           git push origin uat
 
           VERSION=${{ needs.build-and-push.outputs.docker_tag }}
