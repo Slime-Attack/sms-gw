@@ -98,18 +98,24 @@ jobs:
           git config user.name "GitHub Actions Bot"
           git config user.email "github-actions[bot]@users.noreply.github.com"
       
-          while read commit; do
-            [ -z "$commit" ] && continue
-            echo "Cherry-picking $commit"
+          # Merge each PR branch individually
+          while read line; do
+            [ -z "$line" ] && continue
+            PR_NUMBER=$(echo "$line" | cut -d' ' -f1)
+            MERGE_COMMIT=$(echo "$line" | cut -d' ' -f2)
             
-            # Check if this is a merge commit (has two parents)
-            if git show --no-patch --format="%P" "$commit" | grep -q " "; then
-              echo "This is a merge commit, using mainline parent (-m 1)"
-              git cherry-pick -m 1 "$commit" || exit 1
+            echo "Merging PR #$PR_NUMBER ($MERGE_COMMIT)"
+            
+            # Get the branch name or commit for this PR
+            PR_BRANCH=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefName -q '.headRefName')
+            if [ -n "$PR_BRANCH" ]; then
+              git fetch origin "$PR_BRANCH"
+              git merge "origin/$PR_BRANCH" --no-ff -m "Merge PR #$PR_NUMBER for UAT"
             else
-              git cherry-pick "$commit" || exit 1
+              # Fallback: merge by commit
+              git merge "$MERGE_COMMIT" --no-ff -m "Merge PR #$PR_NUMBER for UAT"
             fi
-          done < commits.txt
+          done < all_uat_prs.txt
       
           git push origin uat-candidate --force
 
