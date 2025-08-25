@@ -89,7 +89,14 @@ jobs:
       
           echo "Collected commits:"
           cat commits.txt
-
+          
+      - name: Upload PR numbers artifact
+        if: ${{ steps.collect.outputs.has_prs == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-numbers
+          path: pr_numbers.txt
+          
       - name: Build uat-candidate branch using GitHub API
         if: ${{ steps.collect.outputs.has_prs == 'true' }}
         env:
