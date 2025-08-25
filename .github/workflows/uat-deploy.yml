@@ -99,9 +99,6 @@ jobs:
 
       - name: Build uat-candidate branch using merge
         if: ${{ steps.collect.outputs.has_prs == 'true' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           git fetch origin develop uat
@@ -111,34 +108,44 @@ jobs:
           git config user.name "GitHub Actions Bot"
           git config user.email "github-actions[bot]@users.noreply.github.com"
       
-          # Create a merge commit using GitHub API for proper merge tracking
-          PR_LIST=$(cat pr_numbers.txt)
-          MERGE_MESSAGE="Merge UAT PRs: $PR_LIST"
+          # Find the common ancestor between develop and uat
+          MERGE_BASE=$(git merge-base origin/develop origin/uat)
+          echo "Using merge base: $MERGE_BASE"
+      
+          # Create a temporary branch from the merge base
+          git checkout -b temp-merge-base $MERGE_BASE
+      
+          # Apply each PR commit sequentially
+          while read commit; do
+            [ -z "$commit" ] && continue
+            echo "Applying commit $commit"
+            
+            # Check if commit is already in the history
+            if git merge-base --is-ancestor $commit HEAD 2>/dev/null; then
+              echo "Commit $commit is already in history, skipping"
+              continue
+            fi
+            
+            git cherry-pick $commit || { 
+              echo "Cherry-pick failed, checking if empty..."
+              # Check if cherry-pick would be empty
+              if git diff --quiet HEAD $commit; then
+                echo "Empty cherry-pick, skipping"
+                git cherry-pick --skip
+              else
+                echo "Real conflict detected, aborting"
+                git cherry-pick --abort
+                exit 1
+              fi
+            }
+          done < commits.txt
           
-          # Get the current HEAD of uat-candidate
-          UAT_HEAD=$(git rev-parse HEAD)
-          
-          # Get the HEAD of develop
-          git fetch origin develop
-          DEVELOP_HEAD=$(git rev-parse origin/develop)
-          
-          # Create a merge commit manually
-          git checkout -b temp-merge $UAT_HEAD
-          git merge $DEVELOP_HEAD -m "$MERGE_MESSAGE" --no-ff --no-commit 2>/dev/null || true
-          
-          # If there are changes, commit them
-          if ! git diff --cached --quiet || ! git diff --quiet; then
-            git commit -m "$MERGE_MESSAGE"
-          else
-            echo "No changes to merge"
-          fi
-          
-          # Go back to uat-candidate and fast-forward
+          # Now switch back to uat-candidate and merge properly
           git checkout uat-candidate
-          git merge temp-merge --ff-only
+          git merge temp-merge-base -m "Merge UAT PRs: $PRS" --no-ff
           
           # Clean up
-          git branch -D temp-merge
+          git branch -D temp-merge-base
           git push origin uat-candidate --force
 
       - name: Set Docker tag
