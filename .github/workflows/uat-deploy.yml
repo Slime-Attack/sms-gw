@@ -18,7 +18,6 @@ jobs:
       should_deploy: ${{ steps.collect.outputs.has_prs }}
       prs: ${{ steps.collect.outputs.prs }}
       docker_tag: ${{ steps.version.outputs.docker_tag }}
-      repo: ${{ steps.collect.outputs.REPO }} 
     steps:
       - uses: actions/checkout@v4
         with:
@@ -87,8 +86,6 @@ jobs:
       
           echo "Collected commits:"
           cat commits.txt
-          
-          echo "REPO=$REPO" >> $GITHUB_OUTPUT
 
       - name: Build uat-candidate branch
         if: ${{ steps.collect.outputs.has_prs == 'true' }}
@@ -112,7 +109,7 @@ jobs:
             echo "Merging PR #$PR_NUMBER ($MERGE_COMMIT)"
             
             # Get the branch name or commit for this PR
-            PR_BRANCH=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefName -q '.headRefName')
+            PR_BRANCH=$(gh pr view "$PR_NUMBER" --repo "${{ github.repository }}" --json headRefName -q '.headRefName')
             if [ -n "$PR_BRANCH" ]; then
               git fetch origin "$PR_BRANCH"
               git merge "origin/$PR_BRANCH" --no-ff -m "Merge PR #$PR_NUMBER for UAT"
