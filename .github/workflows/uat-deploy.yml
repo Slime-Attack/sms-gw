@@ -199,6 +199,36 @@ jobs:
             apexdev23/sms-gw:${{ needs.prepare-candidate.outputs.docker_tag }}
             apexdev23/sms-gw:latest-uat
 
+      - name: Remove promote:uat labels (after successful build)
+        if: ${{ always() }}  # Run even if previous steps fail
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          if [ -f pr_numbers.txt ]; then
+            PRS=$(cat pr_numbers.txt)
+            if [ -n "$PRS" ]; then
+              IFS=',' read -ra arr <<< "$PRS"
+              for num in "${arr[@]}"; do
+                echo "Removing promote:uat label from PR #$num"
+                
+                # Check if label exists and remove it
+                if gh pr view "$num" --repo "$REPO" --json labels | jq -e '.labels[].name | select(. == "promote:uat")' >/dev/null; then
+                  echo "Removing promote:uat label from PR #$num"
+                  gh pr edit "$num" --remove-label "promote:uat" --repo "$REPO" && \
+                    echo "Successfully removed label from PR #$num" || \
+                    echo "Failed to remove label from PR #$num"
+                else
+                  echo "PR #$num no longer has promote:uat label"
+                fi
+              done
+            else
+              echo "No PR numbers found in pr_numbers.txt"
+            fi
+          else
+            echo "pr_numbers.txt file not found"
+          fi
+
   deploy-uat:
     needs: build-and-push
     runs-on: [self-hosted, uat]
@@ -239,36 +269,3 @@ jobs:
           git tag -f "$VERSION"
           git push origin "$VERSION" --force
 
-      - name: Remove promote:uat labels
-        if: ${{ success() }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-        run: |
-          PRS="${{ needs.build-and-push.outputs.prs }}"
-          if [ -n "$PRS" ] && [ "$PRS" != "" ]; then
-            IFS=',' read -ra arr <<< "$PRS"
-            for num in "${arr[@]}"; do
-              echo "Removing promote:uat label from PR #$num using GitHub API"
-              
-              # Remove label using GitHub API directly with curl
-              response=$(curl -s -w "%{http_code}" -X DELETE \
-                -H "Authorization: token $GH_TOKEN" \
-                -H "Accept: application/vnd.github.v3+json" \
-                "https://api.github.com/repos/$REPO/issues/$num/labels/promote:uat" \
-                2>/dev/null)
-              
-              status_code=$(echo "$response" | tail -n1)
-              
-              if [ "$status_code" = "404" ]; then
-                echo "Label already removed from PR #$num"
-              elif [ "$status_code" = "200" ] || [ "$status_code" = "204" ]; then
-                echo "Successfully removed promote:uat label from PR #$num"
-              else
-                echo "Failed to remove label from PR #$num (HTTP $status_code)"
-                echo "Response: $(echo "$response" | head -n -1)"
-              fi
-            done
-          else
-            echo "No PR numbers found in outputs"
-          fi
