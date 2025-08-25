@@ -152,6 +152,9 @@ jobs:
     needs: prepare-candidate
     if: ${{ needs.prepare-candidate.outputs.should_deploy == 'true' }}
     runs-on: ubuntu-latest
+    outputs:
+      docker_tag: ${{ needs.prepare-candidate.outputs.docker_tag }}  # Add this output
+      prs: ${{ needs.prepare-candidate.outputs.prs }}
     steps:
       - uses: actions/checkout@v4
         with:
