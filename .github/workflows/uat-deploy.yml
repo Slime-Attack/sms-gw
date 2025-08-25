@@ -238,33 +238,36 @@ jobs:
           git tag -f "$VERSION"
           git push origin "$VERSION" --force
 
-      - name: Remove promote:uat labels (after successful build)
+      - name: Remove promote:uat labels
         if: ${{ success() }}
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
         run: |
-          if [ -f pr_numbers.txt ]; then
-            PRS=$(cat pr_numbers.txt)
-            if [ -n "$PRS" ]; then
-              IFS=',' read -ra arr <<< "$PRS"
-              for num in "${arr[@]}"; do
-                echo "Removing promote:uat label from PR #$num"
-                
-                # Check if the PR still has the promote:uat label
-                HAS_LABEL=$(gh pr view "$num" --repo "$REPO" --json labels | jq -r '.labels[].name' | grep -c "promote:uat" || true)
-                
-                if [ "$HAS_LABEL" -gt 0 ]; then
-                  echo "Removing promote:uat label from PR #$num"
-                  gh pr edit "$num" --remove-label "promote:uat" --repo "$REPO" || \
-                    echo "Warning: Failed to remove label from PR #$num"
-                else
-                  echo "PR #$num no longer has promote:uat label"
-                fi
-              done
-            else
-              echo "No PR numbers found in pr_numbers.txt"
-            fi
+          PRS="${{ needs.build-and-push.outputs.prs }}"
+          if [ -n "$PRS" ] && [ "$PRS" != "" ]; then
+            IFS=',' read -ra arr <<< "$PRS"
+            for num in "${arr[@]}"; do
+              echo "Removing promote:uat label from PR #$num using GitHub API"
+              
+              # Remove label using GitHub API directly with curl
+              response=$(curl -s -w "%{http_code}" -X DELETE \
+                -H "Authorization: token $GH_TOKEN" \
+                -H "Accept: application/vnd.github.v3+json" \
+                "https://api.github.com/repos/$REPO/issues/$num/labels/promote:uat" \
+                2>/dev/null)
+              
+              status_code=$(echo "$response" | tail -n1)
+              
+              if [ "$status_code" = "404" ]; then
+                echo "Label already removed from PR #$num"
+              elif [ "$status_code" = "200" ] || [ "$status_code" = "204" ]; then
+                echo "Successfully removed promote:uat label from PR #$num"
+              else
+                echo "Failed to remove label from PR #$num (HTTP $status_code)"
+                echo "Response: $(echo "$response" | head -n -1)"
+              fi
+            done
           else
-            echo "pr_numbers.txt file not found"
+            echo "No PR numbers found in outputs"
           fi
