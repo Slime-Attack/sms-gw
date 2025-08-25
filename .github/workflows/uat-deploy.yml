@@ -200,7 +200,7 @@ jobs:
             apexdev23/sms-gw:latest-uat
 
       - name: Remove promote:uat labels (after successful build)
-        if: ${{ always() }}  # Run even if previous steps fail
+        if: ${{ success() }}  # Only remove labels if build succeeded
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -210,17 +210,12 @@ jobs:
             if [ -n "$PRS" ]; then
               IFS=',' read -ra arr <<< "$PRS"
               for num in "${arr[@]}"; do
-                echo "Removing promote:uat label from PR #$num"
+                echo "Attempting to remove promote:uat label from PR #$num"
                 
-                # Check if label exists and remove it
-                if gh pr view "$num" --repo "$REPO" --json labels | jq -e '.labels[].name | select(. == "promote:uat")' >/dev/null; then
-                  echo "Removing promote:uat label from PR #$num"
-                  gh pr edit "$num" --remove-label "promote:uat" --repo "$REPO" && \
-                    echo "Successfully removed label from PR #$num" || \
-                    echo "Failed to remove label from PR #$num"
-                else
-                  echo "PR #$num no longer has promote:uat label"
-                fi
+                # Remove the label using gh CLI (which works on Ubuntu runner)
+                gh pr edit "$num" --remove-label "promote:uat" --repo "$REPO" && \
+                  echo "✅ Successfully removed label from PR #$num" || \
+                  echo "⚠️  Failed to remove label from PR #$num (may already be removed)"
               done
             else
               echo "No PR numbers found in pr_numbers.txt"
