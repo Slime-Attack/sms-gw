@@ -90,59 +90,43 @@ jobs:
           echo "Collected commits:"
           cat commits.txt
 
-      - name: Build uat-candidate branch
+      - name: Build uat-candidate branch using GitHub API
         if: ${{ steps.collect.outputs.has_prs == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          git fetch origin uat develop
+          
+          # Create a new branch from uat
+          git fetch origin uat
           git checkout -B uat-candidate origin/uat
           
-          # Configure git user identity
-          git config user.name "GitHub Actions Bot"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-      
-          # Create a new branch from develop that contains only the needed PRs
-          git checkout -b temp-uat-prs origin/develop
-          
-          # Reset to the common ancestor to create a clean history
-          COMMON_ANCESTOR=$(git merge-base origin/develop origin/uat)
-          git reset --hard $COMMON_ANCESTOR
-          
-          # Apply each PR commit (this creates a linear history)
+          # For each PR, create a merge commit using GitHub API
           while read commit; do
             [ -z "$commit" ] && continue
             
-            echo "Applying commit $commit"
+            # Find the PR number from the commit
+            PR_NUMBER=$(gh api -X GET "repos/$REPO/commits/$commit/pulls" -q '.[0].number' || echo "")
             
-            # Check if this is a merge commit
-            if git show --no-patch --format="%P" "$commit" | grep -q " "; then
-              # For merge commits, create a regular commit with the same changes
-              git checkout $commit -- .
-              git add -A
-              if ! git diff --cached --quiet; then
-                git commit -m "Apply changes from PR commit $commit"
-              else
-                echo "No changes to commit from $commit"
-              fi
+            if [ -n "$PR_NUMBER" ]; then
+              echo "Merging PR #$PR_NUMBER ($commit)"
+              
+              # Use GitHub API to create a proper merge
+              gh pr merge $PR_NUMBER --merge --subject "Merge PR #$PR_NUMBER to UAT" --body "Automated UAT deployment"
+              
+              # Pull the changes
+              git pull origin uat-candidate
             else
-              # For regular commits, just cherry-pick
-              if git cherry-pick "$commit"; then
-                echo "Successfully applied commit $commit"
+              echo "Could not find PR for commit $commit, applying directly"
+              if git show --no-patch --format="%P" "$commit" | grep -q " "; then
+                git cherry-pick -x -m 1 "$commit" || git cherry-pick --skip
               else
-                echo "Failed to apply $commit, may be empty - skipping"
-                git cherry-pick --skip
+                git cherry-pick -x "$commit" || git cherry-pick --skip
               fi
             fi
           done < commits.txt
           
-          # Now merge the temporary branch into uat-candidate
-          git checkout uat-candidate
-          git merge temp-uat-prs -m "Merge UAT PRs: $PRS" --no-ff
-          
-          # Clean up
-          git branch -D temp-uat-prs
           git push origin uat-candidate --force
 
       - name: Set Docker tag
