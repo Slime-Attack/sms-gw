@@ -98,18 +98,9 @@ jobs:
           git config user.name "GitHub Actions Bot"
           git config user.email "github-actions[bot]@users.noreply.github.com"
       
-          while read commit; do
-            [ -z "$commit" ] && continue
-            echo "Cherry-picking $commit"
-            
-            # Check if this is a merge commit (has two parents)
-            if git show --no-patch --format="%P" "$commit" | grep -q " "; then
-              echo "This is a merge commit, using mainline parent (-m 1)"
-              git cherry-pick -m 1 "$commit" || exit 1
-            else
-              git cherry-pick "$commit" || exit 1
-            fi
-          done < commits.txt
+          # Merge all relevant PRs at once
+          PR_COMMITS=$(cat commits.txt | tr '\n' ' ')
+          git merge $PR_COMMITS -m "Merge PRs for UAT: $PRS"
       
           git push origin uat-candidate --force
 
