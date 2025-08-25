@@ -191,13 +191,19 @@ jobs:
           git push origin "$VERSION" --force
 
       - name: Remove promote:uat labels
-        if: ${{ success() && needs.build-and-push.outputs.prs != '' }}
+        if: ${{ success() }}
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
         run: |
-          IFS=',' read -ra arr <<< "${{ needs.build-and-push.outputs.prs }}"
-          for num in "${arr[@]}"; do
-            echo "Removing label from PR #$num"
-            gh pr edit "$num" --remove-label "promote:uat" --repo "$REPO" || true
-          done
+          PRS=$(cat pr_numbers.txt)
+          if [ -n "$PRS" ]; then
+            IFS=',' read -ra arr <<< "$PRS"
+            for num in "${arr[@]}"; do
+              echo "Removing promote:uat label from PR #$num"
+              gh pr edit "$num" --remove-label "promote:uat" --repo "$REPO" || \
+                echo "Failed to remove label from PR #$num (might already be removed)"
+            done
+          else
+            echo "No PR numbers found to remove labels from"
+          fi
