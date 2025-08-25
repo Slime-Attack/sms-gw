@@ -90,17 +90,23 @@ jobs:
           echo "Collected commits:"
           cat commits.txt
           
-      - name: Upload PR numbers artifact
+      - name: Upload deployment artifacts
         if: ${{ steps.collect.outputs.has_prs == 'true' }}
         uses: actions/upload-artifact@v4
         with:
-          name: pr-numbers
-          path: pr_numbers.txt
+          name: deployment-data
+          path: |
+            commits.txt
+            pr_numbers.txt
           
       - name: Build uat-candidate branch
         if: ${{ steps.collect.outputs.has_prs == 'true' }}
         run: |
           set -euo pipefail
+          
+          # Download the artifacts first
+          ls -la
+          
           git fetch origin uat
           git checkout -B uat-candidate origin/uat
           
@@ -108,8 +114,12 @@ jobs:
           git config user.name "GitHub Actions Bot"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Clean up temporary files from previous steps
-          rm -f all_uat_prs.txt commits.txt prs_to_deploy.txt 2>/dev/null || true
+          # Check if commits.txt exists
+          if [ ! -f commits.txt ]; then
+            echo "Error: commits.txt file not found!"
+            ls -la
+            exit 1
+          fi
 
           while read commit; do
             [ -z "$commit" ] && continue
@@ -160,10 +170,10 @@ jobs:
           ref: uat-candidate
           fetch-depth: 0
 
-      - name: Download PR numbers artifact
+      - name: Download deployment artifacts
         uses: actions/download-artifact@v4
         with:
-          name: pr-numbers
+          name: deployment-data
           path: .
 
       - name: Read PR numbers for output
@@ -196,10 +206,10 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Download PR numbers artifact
+      - name: Download deployment artifacts
         uses: actions/download-artifact@v4
         with:
-          name: pr-numbers
+          name: deployment-data
           path: .
 
       - name: Docker login on server
