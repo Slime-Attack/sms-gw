@@ -1,17 +1,9 @@
 name: CI/CD UAT Deploy
 
 on:
-  workflow_dispatch:
-    inputs:
-      docker_tag:
-        description: Docker tag to use
-        required: true
-      prs:
-        description: Comma-separated PR numbers
-        required: false
-      artifact_run_id:
-        description: Run ID of the prepare workflow (for artifacts)
-        required: true
+  workflow_run:
+    workflows: ["UAT Prepare"]
+    types: [completed]
 
 permissions:
   actions: read
@@ -24,11 +16,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build-and-deploy:
+  build-and-push:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
-    env:
-      DOCKER_TAG: ${{ inputs.docker_tag }}
-      PRS: ${{ inputs.prs }}
+    
     steps:
       - uses: actions/checkout@v4
         with:
@@ -43,12 +34,28 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: deployment-data
-          run-id: ${{ inputs.artifact_run_id }}
+          run-id: ${{ github.event.workflow_run.id }}
 
-      - name: Show files
-        run: ls -la
+      - name: Read inputs from artifact
+        id: inputs
+        run: |
+          set -euo pipefail
+          if [ ! -f docker_tag.txt ]; then echo "docker_tag.txt missing"; exit 1; fi
+          TAG=$(cat docker_tag.txt)
+          PRS=$( [ -f pr_numbers.txt ] && cat pr_numbers.txt || echo "" )
 
-      - name: Build uat-candidate branch (no force in prepare; force here if needed)
+          echo "docker_tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "prs=$PRS" >> "$GITHUB_OUTPUT"
+
+          # If there are no PRs to deploy, we can exit gracefully later
+          if [ -z "$PRS" ]; then
+            echo "no_prs=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "no_prs=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build uat-candidate branch
+        if: ${{ steps.inputs.outputs.no_prs == 'false' }}
         run: |
           set -euo pipefail
           git fetch origin uat
@@ -82,12 +89,13 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build & push Docker image
+        if: ${{ steps.inputs.outputs.no_prs == 'false' }}
         uses: docker/build-push-action@v5
         with:
           context: .
           push: true
           tags: |
-            apexdev23/sms-gw:${{ env.DOCKER_TAG }}
+            apexdev23/sms-gw:${{ steps.inputs.outputs.docker_tag }}
             apexdev23/sms-gw:latest-uat
 
       - name: Remove label with gh
@@ -96,29 +104,44 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          PRS_FILE_PRs=$( [ -f pr_numbers.txt ] && cat pr_numbers.txt || true )
-          ALL="${PRS:-$PRS_FILE_PRs}"
-          if [ -n "$ALL" ]; then
-            IFS=',' read -ra arr <<< "$ALL"
-            for num in "${arr[@]}"; do
-              echo "Removing 'promote:uat' from PR #$num"
-              gh pr edit "$num" --remove-label "promote:uat"
-            done
-          fi
+          IFS=',' read -ra arr <<< "${{ steps.inputs.outputs.prs }}"
+          for num in "${arr[@]}"; do
+            [ -z "$num" ] && continue
+            echo "Removing 'promote:uat' from PR #$num"
+            gh pr edit "$num" --remove-label "promote:uat"
+          done
 
-      - name: Deploy UAT
+      - name: Upload tag as job output (for next job)
+        id: out
+        run: echo "docker_tag=${{ steps.inputs.outputs.docker_tag }}" >> "$GITHUB_OUTPUT"
+
+  deploy-uat:
+    needs: build-and-push
+    if: ${{ needs.build-and-push.result == 'success' }}
+    runs-on: [self-hosted, uat]
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Docker login on server
         run: |
           echo ${{ secrets.DOCKERHUB_TOKEN }} | docker login -u ${{ secrets.DOCKERHUB_USERNAME }} --password-stdin
+
+      - name: Deploy App
+        run: |
           cd ~/sms-gw
-          ./deploy.sh "${{ env.DOCKER_TAG }}"
+          ./deploy.sh "${{ needs.build-and-push.outputs.docker_tag || '' }}"
 
       - name: Fast-forward uat to candidate and tag
-        if: ${{ success() }}
         run: |
           set -euo pipefail
           git fetch origin uat uat-candidate
           git checkout uat
           git merge origin/uat-candidate --ff-only
           git push origin uat
-          git tag -f "${{ env.DOCKER_TAG }}"
-          git push origin "${{ env.DOCKER_TAG }}" --force
+          VERSION="${{ needs.build-and-push.outputs.docker_tag || '' }}"
+          [ -z "$VERSION" ] && { echo "No version found"; exit 1; }
+          git tag -f "$VERSION"
+          git push origin "$VERSION" --force
