@@ -1,0 +1,123 @@
+name: UAT Build & Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      docker_tag:
+        description: Docker tag to use
+        required: true
+      prs:
+        description: Comma-separated PR numbers
+        required: false
+      artifact_run_id:
+        description: Run ID of the prepare workflow (for artifacts)
+        required: true
+
+permissions:
+  contents: write          # push branches/tags
+  pull-requests: write     # gh pr edit (optional but handy)
+  issues: write            # add/remove labels
+
+concurrency:
+  group: uat
+  cancel-in-progress: true
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    env:
+      DOCKER_TAG: ${{ inputs.docker_tag }}
+      PRS: ${{ inputs.prs }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Ensure jq + gh
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq gh
+
+      - name: Download deployment artifacts from Prepare run
+        uses: actions/download-artifact@v4
+        with:
+          name: deployment-data
+          run-id: ${{ inputs.artifact_run_id }}
+
+      - name: Show files
+        run: ls -la
+
+      - name: Build uat-candidate branch (no force in prepare; force here if needed)
+        run: |
+          set -euo pipefail
+          git fetch origin uat
+          git checkout -B uat-candidate origin/uat
+          git config user.name "GitHub Actions Bot"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          if [ ! -f commits.txt ]; then
+            echo "No commits.txt found"; exit 1
+          fi
+
+          while read -r commit; do
+            [ -z "$commit" ] && continue
+            echo "Attempting to cherry-pick $commit"
+            if git merge-base --is-ancestor "$commit" HEAD 2>/dev/null; then
+              echo "Commit $commit already in history"; continue
+            fi
+            if git show --no-patch --format="%P" "$commit" | grep -q " "; then
+              git cherry-pick -x -m 1 "$commit" || { echo "Empty/conflict, skipping"; git cherry-pick --skip; }
+            else
+              git cherry-pick -x "$commit" || { echo "Empty/conflict, skipping"; git cherry-pick --skip; }
+            fi
+          done < commits.txt
+
+          git push origin uat-candidate --force
+
+      - name: Docker login
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build & push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            apexdev23/sms-gw:${{ env.DOCKER_TAG }}
+            apexdev23/sms-gw:latest-uat
+
+      - name: Remove label with gh
+        if: ${{ success() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          PRS_FILE_PRs=$( [ -f pr_numbers.txt ] && cat pr_numbers.txt || true )
+          ALL="${PRS:-$PRS_FILE_PRs}"
+          if [ -n "$ALL" ]; then
+            IFS=',' read -ra arr <<< "$ALL"
+            for num in "${arr[@]}"; do
+              echo "Removing 'promote:uat' from PR #$num"
+              gh pr edit "$num" --remove-label "promote:uat"
+            done
+          fi
+
+      - name: Deploy UAT
+        run: |
+          echo ${{ secrets.DOCKERHUB_TOKEN }} | docker login -u ${{ secrets.DOCKERHUB_USERNAME }} --password-stdin
+          cd ~/sms-gw
+          ./deploy.sh "${{ env.DOCKER_TAG }}"
+
+      - name: Fast-forward uat to candidate and tag
+        if: ${{ success() }}
+        run: |
+          set -euo pipefail
+          git fetch origin uat uat-candidate
+          git checkout uat
+          git merge origin/uat-candidate --ff-only
+          git push origin uat
+          git tag -f "${{ env.DOCKER_TAG }}"
+          git push origin "${{ env.DOCKER_TAG }}" --force
