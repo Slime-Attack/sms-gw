@@ -4,8 +4,8 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
-  pull-requests: read
+  contents: read
+  pull-requests: write
   issues: write
 
 concurrency:
@@ -198,68 +198,19 @@ jobs:
           tags: |
             apexdev23/sms-gw:${{ needs.prepare-candidate.outputs.docker_tag }}
             apexdev23/sms-gw:latest-uat
-
-      - name: Remove promote:uat labels (after successful build)
+            
+      - name: Remove label with gh
         if: ${{ success() }}
         env:
           GH_TOKEN: ${{ github.token }}
-          REPO_OWNER: ${{ github.repository_owner }}
-          REPO_NAME: ${{ github.event.repository.name }}
         run: |
+          set -euo pipefail
           if [ -f pr_numbers.txt ]; then
-            PRS=$(cat pr_numbers.txt)
-            if [ -n "$PRS" ]; then
-              IFS=',' read -ra arr <<< "$PRS"
-              for num in "${arr[@]}"; do
-                echo "Removing promote:uat label from PR #$num using REST API"
-                
-                # Use GitHub REST API to remove label
-                response=$(curl -s -w "%{http_code}" -X DELETE \
-                  -H "Authorization: token $GH_TOKEN" \
-                  -H "Accept: application/vnd.github.v3+json" \
-                  "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/issues/$num/labels/promote:uat" \
-                  2>/dev/null)
-                
-                status_code=$(echo "$response" | tail -n1)
-                
-                if [ "$status_code" = "404" ]; then
-                  echo "✅ Label already removed from PR #$num"
-                elif [ "$status_code" = "200" ] || [ "$status_code" = "204" ]; then
-                  echo "✅ Successfully removed promote:uat label from PR #$num"
-                elif [ "$status_code" = "403" ]; then
-                  echo "⚠️  Permission denied for PR #$num - using alternative approach"
-                  
-                  # Alternative: Use the issues API to replace all labels (excluding promote:uat)
-                  current_labels=$(curl -s \
-                    -H "Authorization: token $GH_TOKEN" \
-                    -H "Accept: application/vnd.github.v3+json" \
-                    "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/issues/$num/labels" | \
-                    jq -r '.[].name | select(. != "promote:uat")' | tr '\n' ',' | sed 's/,$//')
-                  
-                  if [ -n "$current_labels" ]; then
-                    curl -s -X PUT \
-                      -H "Authorization: token $GH_TOKEN" \
-                      -H "Accept: application/vnd.github.v3+json" \
-                      -d "{\"labels\": [\"$current_labels\"]}" \
-                      "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/issues/$num/labels" && \
-                      echo "✅ Removed promote:uat label via label replacement"
-                  else
-                    curl -s -X PUT \
-                      -H "Authorization: token $GH_TOKEN" \
-                      -H "Accept: application/vnd.github.v3+json" \
-                      -d '{"labels": []}' \
-                      "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/issues/$num/labels" && \
-                      echo "✅ Removed all labels from PR #$num"
-                  fi
-                else
-                  echo "⚠️  Failed to remove label from PR #$num (HTTP $status_code)"
-                fi
-              done
-            else
-              echo "No PR numbers found in pr_numbers.txt"
-            fi
-          else
-            echo "pr_numbers.txt file not found"
+            IFS=',' read -ra arr <<< "$(cat pr_numbers.txt)"
+            for num in "${arr[@]}"; do
+              echo "Removing 'promote:uat' from PR #$num"
+              gh pr edit "$num" --remove-label "promote:uat"
+            done
           fi
 
   deploy-uat:
