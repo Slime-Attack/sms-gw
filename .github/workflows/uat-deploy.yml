@@ -2,7 +2,7 @@ name: CI/CD UAT Deploy
 
 on:
   workflow_run:
-    workflows: ["UAT Prepare"]
+    workflows: ["CI/CD UAT Prepare"]
     types: [completed]
 
 permissions:
