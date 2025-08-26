@@ -1,24 +1,20 @@
-name: CI/CD UAT Deploy
+name: CI/CD UAT Prepare
 
 on:
   workflow_dispatch:
 
 permissions:
   contents: read
-  pull-requests: write
-  issues: write
+  pull-requests: read
+  issues: read
 
 concurrency:
   group: uat
   cancel-in-progress: true
 
 jobs:
-  prepare-candidate:
+  prepare:
     runs-on: ubuntu-latest
-    outputs:
-      should_deploy: ${{ steps.collect.outputs.has_prs }}
-      prs: ${{ steps.collect.outputs.prs }}
-      docker_tag: ${{ steps.version.outputs.docker_tag }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -36,119 +32,45 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-      
           git fetch --tags origin
           LAST_TAG=$(git tag --sort=-creatordate | grep '^uat-v' | head -n1 || true)
-      
-          # Get all PRs with promote:uat label
+
+          # All merged PRs with promote:uat going into develop
           gh pr list --repo "$REPO" --state merged --label "promote:uat" \
-            --json number,mergeCommit,baseRefName | jq -r '.[] | select(.baseRefName == "develop") | "\(.number) \(.mergeCommit.oid)"' > all_uat_prs.txt
-      
+            --json number,mergeCommit,baseRefName \
+            | jq -r '.[] | select(.baseRefName=="develop") | "\(.number) \(.mergeCommit.oid)"' > all_uat_prs.txt
+
           if [ ! -s all_uat_prs.txt ]; then
-            echo "prs=" >> "$GITHUB_OUTPUT"
-            echo "has_prs=false" >> "$GITHUB_OUTPUT"
             echo "No PRs found with promote:uat label."
-            exit 0
-          fi
-      
-          # Filter out PRs already in last UAT deployment
-          > prs_to_deploy.txt
-          > commits.txt
-          
-          while read line; do
-            [ -z "$line" ] && continue
-            PR_NUMBER=$(echo "$line" | cut -d' ' -f1)
-            MERGE_COMMIT=$(echo "$line" | cut -d' ' -f2)
-            
-            if [ -n "$LAST_TAG" ]; then
-              # Check if this PR's merge commit is in the last tag's history
-              if git tag --contains "$MERGE_COMMIT" | grep -q "^uat-v"; then
-                echo "PR #$PR_NUMBER already deployed in previous UAT version, skipping"
+            printf "" > prs_to_deploy.txt
+            printf "" > commits.txt
+          else
+            > prs_to_deploy.txt
+            > commits.txt
+            while read -r line; do
+              [ -z "$line" ] && continue
+              PR_NUMBER=$(echo "$line" | cut -d' ' -f1)
+              MERGE_COMMIT=$(echo "$line" | cut -d' ' -f2)
+              if [ -n "$LAST_TAG" ] && git tag --contains "$MERGE_COMMIT" | grep -q "^uat-v"; then
+                echo "PR #$PR_NUMBER already deployed, skipping"
                 continue
               fi
-            fi
-            
-            echo "PR #$PR_NUMBER needs deployment"
-            echo "$PR_NUMBER" >> prs_to_deploy.txt
-            echo "$MERGE_COMMIT" >> commits.txt
-          done < all_uat_prs.txt
-      
-          if [ ! -s prs_to_deploy.txt ]; then
-            echo "prs=" >> "$GITHUB_OUTPUT"
-            echo "has_prs=false" >> "$GITHUB_OUTPUT"
-            echo "No new PRs found for UAT promotion since last deployment."
-            exit 0
-          fi
-      
-          PRS=$(paste -sd, prs_to_deploy.txt)
-          echo "prs=$PRS" >> "$GITHUB_OUTPUT"
-          echo "has_prs=true" >> "$GITHUB_OUTPUT"
-          echo "PRs to promote: $PRS"
-      
-          # Save PR numbers to a file for later use
-          echo "$PRS" > pr_numbers.txt
-      
-          echo "Collected commits:"
-          cat commits.txt
-          
-      - name: Upload deployment artifacts
-        if: ${{ steps.collect.outputs.has_prs == 'true' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: deployment-data
-          path: |
-            commits.txt
-            pr_numbers.txt
-          
-      - name: Build uat-candidate branch
-        if: ${{ steps.collect.outputs.has_prs == 'true' }}
-        run: |
-          set -euo pipefail
-          
-          # Download the artifacts first
-          ls -la
-          
-          git fetch origin uat
-          git checkout -B uat-candidate origin/uat
-          
-          # Configure git user identity
-          git config user.name "GitHub Actions Bot"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          # Check if commits.txt exists
-          if [ ! -f commits.txt ]; then
-            echo "Error: commits.txt file not found!"
-            ls -la
-            exit 1
+              echo "$PR_NUMBER" >> prs_to_deploy.txt
+              echo "$MERGE_COMMIT" >> commits.txt
+            done < all_uat_prs.txt
           fi
 
-          while read commit; do
-            [ -z "$commit" ] && continue
-            
-            echo "Attempting to cherry-pick $commit"
-            
-            # Skip if already in history
-            if git merge-base --is-ancestor "$commit" HEAD 2>/dev/null; then
-              echo "Commit $commit is already in history, skipping"
-              continue
-            fi
-            
-            # Check if this is a merge commit (has two parents)
-            if git show --no-patch --format="%P" "$commit" | grep -q " "; then
-              echo "This is a merge commit, using mainline parent (-m 1)"
-              git cherry-pick -x -m 1 "$commit" || \
-                { echo "Cherry-pick failed, may be empty - skipping..."; git cherry-pick --skip; }
-            else
-              git cherry-pick -x "$commit" || \
-                { echo "Cherry-pick failed, may be empty - skipping..."; git cherry-pick --skip; }
-            fi
-          done < commits.txt
-      
-          git push origin uat-candidate --force
+          if [ -s prs_to_deploy.txt ]; then
+            PRS=$(paste -sd, prs_to_deploy.txt)
+            echo "$PRS" > pr_numbers.txt
+            echo "PRs to promote: $PRS"
+          else
+            echo "" > pr_numbers.txt
+            echo "No new PRs for UAT promotion."
+          fi
 
       - name: Set Docker tag
         id: version
-        if: ${{ steps.collect.outputs.has_prs == 'true' }}
         run: |
           LATEST=$(git tag --sort=-creatordate | grep '^uat-v' | head -n1 || echo "uat-v0.0.0")
           BASE="${LATEST#uat-v}"
@@ -158,98 +80,27 @@ jobs:
           echo "docker_tag=$NEW" >> "$GITHUB_OUTPUT"
           echo "Using Docker tag: $NEW"
 
-  build-and-push:
-    needs: prepare-candidate
-    if: ${{ needs.prepare-candidate.outputs.should_deploy == 'true' }}
-    runs-on: ubuntu-latest
-    outputs:
-      docker_tag: ${{ needs.prepare-candidate.outputs.docker_tag }}
-      prs: ${{ needs.prepare-candidate.outputs.prs }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: uat-candidate
-          fetch-depth: 0
-
-      - name: Download deployment artifacts
-        uses: actions/download-artifact@v4
+      - name: Upload deployment artifacts
+        uses: actions/upload-artifact@v4
         with:
           name: deployment-data
-          path: .
+          path: |
+            commits.txt
+            pr_numbers.txt
 
-      - name: Read PR numbers for output
-        id: pr-output
-        run: |
-          PRS=$(cat pr_numbers.txt | tr -d '\n')
-          echo "prs=$PRS" >> $GITHUB_OUTPUT
-          echo "PR numbers: $PRS"
-
-      - name: Docker login
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Build & push Docker image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          push: true
-          tags: |
-            apexdev23/sms-gw:${{ needs.prepare-candidate.outputs.docker_tag }}
-            apexdev23/sms-gw:latest-uat
-            
-      - name: Remove label with gh
-        if: ${{ success() }}
+      - name: Trigger Build+Deploy workflow
         env:
           GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          TAG: ${{ steps.version.outputs.docker_tag }}
+          PRS: ${{ steps.collect.outputs.prs }}
         run: |
           set -euo pipefail
-          if [ -f pr_numbers.txt ]; then
-            IFS=',' read -ra arr <<< "$(cat pr_numbers.txt)"
-            for num in "${arr[@]}"; do
-              echo "Removing 'promote:uat' from PR #$num"
-              gh pr edit "$num" --remove-label "promote:uat"
-            done
-          fi
-
-  deploy-uat:
-    needs: build-and-push
-    runs-on: [self-hosted, uat]
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Download deployment artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: deployment-data
-          path: .
-
-      - name: Docker login on server
-        run: |
-          echo ${{ secrets.DOCKERHUB_TOKEN }} | docker login -u ${{ secrets.DOCKERHUB_USERNAME }} --password-stdin
-
-      - name: Deploy App
-        run: |
-          cd ~/sms-gw
-          ./deploy.sh ${{ needs.build-and-push.outputs.docker_tag }}
-
-      - name: Configure Git identity
-        run: |
-          git config user.name "GitHub Actions Bot"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-      - name: Fast-forward uat to candidate
-        if: ${{ success() }}
-        run: |
-          git fetch origin uat uat-candidate
-          git checkout uat
-          git merge origin/uat-candidate --ff-only
-          git push origin uat
-
-          VERSION=${{ needs.build-and-push.outputs.docker_tag }}
-          git tag -f "$VERSION"
-          git push origin "$VERSION" --force
-
+          # Fallback if outputs weren’t set:
+          PRS_VALUE=$(cat pr_numbers.txt || true)
+          gh api repos/$REPO/actions/workflows/uat-build-deploy.yml/dispatches \
+            -f ref="${GITHUB_REF_NAME:-${GITHUB_REF##*/}}" \
+            -f inputs.docker_tag="$TAG" \
+            -f inputs.prs="$PRS_VALUE" \
+            -f inputs.artifact_run_id="$RUN_ID"
