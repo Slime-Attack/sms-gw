@@ -14,9 +14,10 @@ on:
         required: true
 
 permissions:
-  contents: write          # push branches/tags
-  pull-requests: write     # gh pr edit (optional but handy)
-  issues: write            # add/remove labels
+  actions: read
+  contents: write
+  pull-requests: write
+  issues: write
 
 concurrency:
   group: uat
