@@ -1,4 +1,4 @@
-name: UAT Build & Deploy
+name: CI/CD UAT Deploy
 
 on:
   workflow_dispatch:
