@@ -51,6 +51,8 @@ jobs:
         with:
           name: deployment-data
           run-id: ${{ github.event.workflow_run.id }}
+          path: .
+          github-token: ${{ github.token }}  
 
       - name: Read inputs from artifact
         id: inputs
