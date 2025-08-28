@@ -54,7 +54,6 @@ jobs:
           repository: ${{ github.repository }}
           github-token: ${{ github.token }}
           path: .
-          check-artifacts: true
 
       - name: Read inputs from artifact
         id: inputs
