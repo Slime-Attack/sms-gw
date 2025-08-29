@@ -32,22 +32,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y jq gh
 
-      - name: Debug
-        run: |
-          echo "workflow_run.id=${{ github.event.workflow_run.id }}"
-          echo "workflow_run.workflow_id=${{ github.event.workflow_run.workflow_id }}"
-          echo "workflow_run.conclusion=${{ github.event.workflow_run.conclusion }}"
-          echo "repo=${{ github.repository }}"
-
-      - name: Debug
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          gh api repos/$REPO/actions/runs/${{ github.event.workflow_run.id }}/artifacts \
-            | jq -r '.artifacts[] | [.name, .id, .expired] | @tsv'
-
       - name: Download deployment artifacts from Prepare run
         uses: actions/download-artifact@v4
         with:
